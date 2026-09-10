@@ -936,3 +936,7 @@ Content-Type: application/json
 - **用途**: 可以通过MCP客户端调用相同的功能
 
 更多MCP协议相关信息请参考 [Model Context Protocol 官方文档](https://modelcontextprotocol.io/)。
+
+## 单人文字私信
+
+新增 `GET /api/v1/direct-messages/conversations`、`POST /api/v1/direct-messages/preview` 和 `POST /api/v1/direct-messages/send`。参数、确认要求及 `sent` / `failed` / `unknown` 结果契约见 [私信功能说明](direct-messages.md)。

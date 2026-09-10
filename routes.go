@@ -65,6 +65,9 @@ func setupRoutes(appServer *AppServer) *gin.Engine {
 		api.POST("/notifications/list", appServer.listNotificationsHandler)
 		api.POST("/notifications/reply", appServer.replyNotificationHandler)
 		api.POST("/notifications/like", appServer.likeNotificationHandler)
+		api.GET("/direct-messages/conversations", appServer.listDirectMessageConversationsHandler)
+		api.POST("/direct-messages/preview", appServer.previewDirectMessageHandler)
+		api.POST("/direct-messages/send", appServer.sendDirectMessageHandler)
 	}
 
 	return router

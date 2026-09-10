@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -20,7 +21,8 @@ import (
 
 // XiaohongshuService 小红书业务服务
 type XiaohongshuService struct {
-	logins loginSessions
+	logins          loginSessions
+	directMessageMu sync.Mutex
 }
 
 // NewXiaohongshuService 创建小红书服务实例
