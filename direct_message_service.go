@@ -9,7 +9,7 @@ import (
 
 func (s *XiaohongshuService) ListDirectMessageConversations(ctx context.Context, name string) (*xiaohongshu.DirectMessageConversationList, error) {
 	b := newBrowser()
-	defer b.Close()
+	defer closeDirectMessageBrowser(b.Close)
 	page := b.NewPage()
 	defer page.Close()
 	return xiaohongshu.NewDirectMessageAction(page).List(ctx, name)
@@ -19,7 +19,7 @@ func (s *XiaohongshuService) PreviewDirectMessage(ctx context.Context, r xiaohon
 		return nil, err
 	}
 	b := newBrowser()
-	defer b.Close()
+	defer closeDirectMessageBrowser(b.Close)
 	page := b.NewPage()
 	defer page.Close()
 	return xiaohongshu.NewDirectMessageAction(page).Preview(ctx, r)
@@ -34,8 +34,14 @@ func (s *XiaohongshuService) SendDirectMessage(ctx context.Context, r xiaohongsh
 	}
 	defer s.directMessageMu.Unlock()
 	b := newBrowser()
-	defer b.Close()
+	defer closeDirectMessageBrowser(b.Close)
 	page := b.NewPage()
 	defer page.Close()
 	return xiaohongshu.NewDirectMessageAction(page).Send(ctx, r)
+}
+
+// 底层 Close 使用 MustClose；清理异常不能覆盖发送后已有的 sent/unknown 结果。
+func closeDirectMessageBrowser(close func()) {
+	defer func() { _ = recover() }()
+	close()
 }

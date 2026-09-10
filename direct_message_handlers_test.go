@@ -77,3 +77,13 @@ func TestDirectMessageConcurrentSendRejectedBeforeBrowser(t *testing.T) {
 	_, err := s.SendDirectMessage(context.Background(), xiaohongshu.DirectMessageRequest{UserID: "0123456789abcdef01234567", ExpectedName: "测试", Content: "你好", Confirm: true})
 	require.ErrorContains(t, err, "正在处理")
 }
+
+func TestDirectMessageCleanupPreservesResult(t *testing.T) {
+	for _, status := range []string{"sent", "unknown"} {
+		result := func() *xiaohongshu.DirectMessageResult {
+			defer closeDirectMessageBrowser(func() { panic("browser disconnected during cleanup") })
+			return &xiaohongshu.DirectMessageResult{Status: status, Success: status == "sent"}
+		}()
+		require.Equal(t, status, result.Status)
+	}
+}
