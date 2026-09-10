@@ -10,6 +10,8 @@
 
 MCP for RedNote (Xiaohongshu) / xiaohongshu.com. Give your AI assistant direct access to RedNote data.
 
+Single-recipient text messages support conversation lookup, preview, and explicitly authorized sending. See [direct-message documentation](docs/direct-messages.md) (Chinese).
+
 ### 🚀 Quick Start: Pick the Version That Fits You
 
 > [!IMPORTANT]

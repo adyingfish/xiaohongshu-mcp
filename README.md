@@ -10,6 +10,8 @@
 
 MCP for 小红书 / xiaohongshu.com。让你的 AI 助手直接访问小红书数据。
 
+单人文字私信支持会话查询、发送前预览和授权后发送，详见 [私信功能说明](docs/direct-messages.md)。
+
 ### 🚀 快速开始：选择最适合你的版本
 
 > [!IMPORTANT]

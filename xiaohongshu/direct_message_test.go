@@ -1,0 +1,193 @@
+package xiaohongshu
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+const dmTestID = "0123456789abcdef01234567"
+
+func dmRequest() DirectMessageRequest {
+	return DirectMessageRequest{UserID: dmTestID, ExpectedName: "测试收件人", Content: "你好😀", Confirm: true}
+}
+
+type fakeDirectMessagePage struct {
+	calls            []string
+	initial          directMessageState
+	states           []directMessageState
+	postSendError    error
+	missingBeforeIDs bool
+	checkErr         error
+	sendErr          error
+	sendPanic        bool
+	navigations      int
+	afterSend        bool
+	fill             string
+}
+
+func (f *fakeDirectMessagePage) Navigate(ctx context.Context, _ string) error {
+	f.navigations++
+	return ctx.Err()
+}
+func (f *fakeDirectMessagePage) Fill(_ context.Context, text string) error {
+	f.calls = append(f.calls, "fill")
+	f.fill = text
+	return nil
+}
+func (f *fakeDirectMessagePage) Run(ctx context.Context, action string, r DirectMessageRequest, _ string) (directMessageState, error) {
+	f.calls = append(f.calls, action)
+	if err := ctx.Err(); err != nil {
+		return directMessageState{}, err
+	}
+	switch action {
+	case "snapshot":
+		return directMessageState{Ready: true, ConversationReady: true, UserID: r.UserID}, nil
+	case "list":
+		return f.initial, nil
+	case "send":
+		f.afterSend = true
+		if f.missingBeforeIDs {
+			return directMessageState{Submitted: true}, nil
+		}
+		if f.sendPanic {
+			panic("connection lost")
+		}
+		return directMessageState{Submitted: true, BeforeIDs: []string{"old"}}, f.sendErr
+	case "check":
+		if !f.afterSend {
+			return f.initial, f.checkErr
+		}
+		if f.postSendError != nil {
+			return directMessageState{}, f.postSendError
+		}
+		if len(f.states) > 0 {
+			s := f.states[0]
+			if len(f.states) > 1 {
+				f.states = f.states[1:]
+			}
+			return s, nil
+		}
+		return directMessageState{}, nil
+	}
+	return directMessageState{}, errors.New("unexpected action")
+}
+func dmAction(f *fakeDirectMessagePage) *DirectMessageAction {
+	return &DirectMessageAction{page: f, pollInterval: time.Millisecond, ackTimeout: 5 * time.Millisecond}
+}
+func TestDirectMessageValidationBeforeBrowser(t *testing.T) {
+	for _, change := range []func(*DirectMessageRequest){
+		func(r *DirectMessageRequest) { r.Confirm = false }, func(r *DirectMessageRequest) { r.UserID = "昵称" },
+		func(r *DirectMessageRequest) { r.ExpectedName = " " }, func(r *DirectMessageRequest) { r.Content = " \n " },
+		func(r *DirectMessageRequest) { r.Content = strings.Repeat("😀", 501) }, func(r *DirectMessageRequest) { r.Content = string([]byte{255}) },
+	} {
+		r := dmRequest()
+		change(&r)
+		f := &fakeDirectMessagePage{}
+		_, err := dmAction(f).Send(context.Background(), r)
+		require.Error(t, err)
+		require.Zero(t, f.navigations)
+	}
+	r := dmRequest()
+	r.Content = strings.Repeat("😀", 500)
+	require.NoError(t, r.Normalize(true))
+	r.Content = "  第一行\r\n第二行  "
+	require.NoError(t, r.Normalize(true))
+	require.Equal(t, "第一行\n第二行", r.Content)
+}
+func TestDirectMessagePreviewDoesNotFillOrSend(t *testing.T) {
+	f := &fakeDirectMessagePage{}
+	r := dmRequest()
+	r.Confirm = false
+	result, err := dmAction(f).Preview(context.Background(), r)
+	require.NoError(t, err)
+	require.Equal(t, "preview", result.Status)
+	require.Equal(t, r.Content, result.Content)
+	require.False(t, *result.Sent)
+	require.NotContains(t, f.calls, "fill")
+	require.NotContains(t, f.calls, "send")
+}
+func TestDirectMessagePreflightRejectsMismatchDraftAndDuplicate(t *testing.T) {
+	for _, f := range []*fakeDirectMessagePage{
+		{checkErr: errors.New("收件人不符")}, {initial: directMessageState{Draft: "其他草稿"}},
+		{initial: directMessageState{Outgoing: []directMessageItem{{MessageID: "old", Text: dmRequest().Content}}}},
+	} {
+		_, err := dmAction(f).Send(context.Background(), dmRequest())
+		require.Error(t, err)
+		require.NotContains(t, f.calls, "send")
+		require.Empty(t, f.fill)
+	}
+}
+func TestDirectMessageAcknowledgement(t *testing.T) {
+	r := dmRequest()
+	msg := func(id, store string, pending, failed bool) directMessageItem {
+		return directMessageItem{MessageID: id, StoreID: store, Text: r.Content, Pending: pending, Failed: failed}
+	}
+	for _, tt := range []struct {
+		name   string
+		states []directMessageState
+		want   string
+	}{
+		{"ack", []directMessageState{{Outgoing: []directMessageItem{msg("new", "1", true, false)}}, {Outgoing: []directMessageItem{msg("new", "18446744073709551616", false, false)}}}, "sent"},
+		{"failed", []directMessageState{{Outgoing: []directMessageItem{msg("new", "0", false, true)}}}, "failed"},
+		{"old cannot acknowledge", []directMessageState{{Outgoing: []directMessageItem{msg("old", "3", false, false)}}}, "unknown"},
+		{"pending", []directMessageState{{Outgoing: []directMessageItem{msg("new", "3", true, false)}}}, "unknown"},
+		{"zero store", []directMessageState{{Outgoing: []directMessageItem{msg("new", "000", false, false)}}}, "unknown"},
+		{"no store", []directMessageState{{Outgoing: []directMessageItem{msg("new", "", false, false)}}}, "unknown"},
+		{"draft remains", []directMessageState{{Draft: r.Content, Outgoing: []directMessageItem{msg("new", "3", false, false)}}}, "unknown"},
+		{"ambiguous", []directMessageState{{Outgoing: []directMessageItem{msg("one", "3", false, false), msg("two", "4", false, false)}}}, "unknown"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeDirectMessagePage{states: tt.states}
+			result, err := dmAction(f).Send(context.Background(), r)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, result.Status)
+			require.Equal(t, r.Content, f.fill)
+			sends := 0
+			for _, call := range f.calls {
+				if call == "send" {
+					sends++
+				}
+			}
+			require.Equal(t, 1, sends)
+			if tt.want == "unknown" {
+				require.Nil(t, result.Sent)
+			} else {
+				require.Equal(t, tt.want == "sent", *result.Sent)
+			}
+		})
+	}
+}
+func TestDirectMessageSendExceptionsAreUnknown(t *testing.T) {
+	for _, f := range []*fakeDirectMessagePage{{sendErr: errors.New("disconnected")}, {sendPanic: true}, {postSendError: errors.New("recipient changed")}, {missingBeforeIDs: true}} {
+		result, err := dmAction(f).Send(context.Background(), dmRequest())
+		require.NoError(t, err)
+		require.Equal(t, "unknown", result.Status)
+		require.Nil(t, result.Sent)
+	}
+}
+func TestDirectMessageExistingIdenticalDraftNotInsertedTwice(t *testing.T) {
+	f := &fakeDirectMessagePage{initial: directMessageState{Draft: dmRequest().Content}}
+	_, err := dmAction(f).Send(context.Background(), dmRequest())
+	require.NoError(t, err)
+	require.NotContains(t, f.calls, "fill")
+}
+func TestDirectMessageCancellationDoesNotSubmit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f := &fakeDirectMessagePage{}
+	_, err := dmAction(f).Send(ctx, dmRequest())
+	require.Error(t, err)
+	require.NotContains(t, f.calls, "send")
+}
+func TestDirectMessageListCoverage(t *testing.T) {
+	f := &fakeDirectMessagePage{initial: directMessageState{Ready: true}}
+	result, err := dmAction(f).List(context.Background(), "")
+	require.NoError(t, err)
+	require.False(t, result.Complete)
+	require.NotNil(t, result.Conversations)
+}
