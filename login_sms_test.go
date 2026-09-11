@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
 type fakeSMSBrowser struct {
@@ -88,6 +89,10 @@ func TestSMSUnknownOutcomeAndConcurrentCallsSubmitOnce(t *testing.T) {
 	wg.Wait()
 	require.Equal(t, 1, b.submits)
 	require.Zero(t, b.saves)
+	progress, _, err := l.status(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "sms_submit_unknown", progress.Status)
+	require.False(t, progress.IsLoggedIn)
 }
 func TestSMSResetInvalidatesChallenge(t *testing.T) {
 	l, b, p := setupSMS(t)
@@ -142,4 +147,25 @@ func TestSMSMCPAndHTTPContracts(t *testing.T) {
 	require.Equal(t, 400, res.Code)
 	require.NotContains(t, res.Body.String(), "012345")
 	require.Equal(t, 1, b.submits)
+}
+
+func TestSMSPreflightFailureRemainsWaitingAndAllowsExplicitRetry(t *testing.T) {
+	l, b, p := setupSMS(t)
+	ctx := context.Background()
+	b.submitErr = xiaohongshu.ErrSMSNotSubmitted
+	_, err := l.submitSMS(ctx, p.SessionID, p.VerificationID, "012345")
+	require.ErrorIs(t, err, xiaohongshu.ErrSMSNotSubmitted)
+	progress, _, err := l.status(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "sms_required", progress.Status)
+	require.False(t, progress.IsLoggedIn)
+	require.Equal(t, 1, b.submits)
+	b.submitErr = nil
+	progress, err = l.submitSMS(ctx, p.SessionID, p.VerificationID, "012345")
+	require.NoError(t, err)
+	require.Equal(t, "sms_submitted", progress.Status)
+	require.Equal(t, 2, b.submits)
+	_, err = l.submitSMS(ctx, p.SessionID, p.VerificationID, "012345")
+	require.Error(t, err)
+	require.Equal(t, 2, b.submits)
 }
