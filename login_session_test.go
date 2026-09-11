@@ -1,79 +1,166 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
+	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
-// TestLoginSessions 固定「同一时刻只保留一个待扫码会话」这条约束。
-//
-// 这是浏览器不再堆积的依据：每个待扫码会话都占着一个浏览器活到超时为止，
-// 只要新会话没能关掉旧的，进程就会累积。
-func TestLoginSessions(t *testing.T) {
-	t.Run("开新会话会关掉上一个", func(t *testing.T) {
-		var l loginSessions
-		closed := 0
+type fakeLoginBrowser struct {
+	mu                       sync.Mutex
+	state                    xiaohongshu.LoginPageState
+	saves, refreshes, closed int
+	saveErr                  error
+}
 
-		l.start(func() { closed++ })
-		assert.Equal(t, 0, closed, "第一个会话不该被关")
-
-		l.start(func() {})
-		assert.Equal(t, 1, closed, "开第二个时应关掉第一个")
+func (b *fakeLoginBrowser) ReadState(context.Context) (xiaohongshu.LoginPageState, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.state, nil
+}
+func (b *fakeLoginBrowser) RefreshQrcode(context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.refreshes++
+	b.state = xiaohongshu.LoginPageState{Status: "verification_required", Img: "data:image/png;base64,new"}
+	return nil
+}
+func (b *fakeLoginBrowser) SaveCookies() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.saves++
+	return b.saveErr
+}
+func (b *fakeLoginBrowser) Close() { b.mu.Lock(); defer b.mu.Unlock(); b.closed++ }
+func (b *fakeLoginBrowser) set(state string, img string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.state = xiaohongshu.LoginPageState{Status: state, Img: img}
+}
+func newFakeLogin(t *testing.T) (*loginSessions, *fakeLoginBrowser, func(context.Context) (loginBrowser, error)) {
+	t.Helper()
+	l := &loginSessions{}
+	b := &fakeLoginBrowser{state: xiaohongshu.LoginPageState{Status: "awaiting_scan", Img: "first"}}
+	t.Cleanup(func() { _ = l.reset(func() error { return nil }) })
+	return l, b, func(context.Context) (loginBrowser, error) { return b, nil }
+}
+func TestLoginReusesSessionAndReturnsVerification(t *testing.T) {
+	l, b, create := newFakeLogin(t)
+	ctx := context.Background()
+	initial, err := l.get(ctx, create)
+	require.NoError(t, err)
+	b.set("verification_required", "second")
+	status, active, err := l.status(ctx)
+	require.NoError(t, err)
+	require.True(t, active)
+	require.Equal(t, "second", status.Img)
+	require.False(t, status.IsLoggedIn)
+	again, err := l.get(ctx, func(context.Context) (loginBrowser, error) {
+		t.Fatal("must not replace pending browser")
+		return nil, nil
 	})
-
-	t.Run("第一个会话无需关闭任何东西", func(t *testing.T) {
-		var l loginSessions
-		assert.NotPanics(t, func() { l.start(func() {}) })
-	})
-
-	t.Run("会话结束后不会再被关第二次", func(t *testing.T) {
-		var l loginSessions
-		closed := 0
-
-		seq := l.start(func() { closed++ })
-		l.finish(seq)
-
-		l.start(func() {})
-		assert.Equal(t, 0, closed, "已结束的会话不该再被关闭")
-	})
-
-	t.Run("旧会话的收尾不会顶掉新会话", func(t *testing.T) {
-		var l loginSessions
-		newClosed := 0
-
-		oldSeq := l.start(func() {})
-		l.start(func() { newClosed++ }) // 新会话上位
-
-		// 旧会话此时才走完收尾，它必须认出自己已不是当前会话
-		l.finish(oldSeq)
-
-		// 再开一个：如果上一步误清了登记，新会话就永远关不掉了
-		l.start(func() {})
-		assert.Equal(t, 1, newClosed, "新会话仍应被后来者关闭")
-	})
-
-	t.Run("并发开会话时每个序号唯一", func(t *testing.T) {
-		var l loginSessions
-		const n = 50
-
-		var mu sync.Mutex
-		seen := make(map[uint64]bool, n)
-
-		var wg sync.WaitGroup
-		for range n {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				seq := l.start(func() {})
-				mu.Lock()
-				seen[seq] = true
-				mu.Unlock()
-			}()
-		}
-		wg.Wait()
-
-		assert.Len(t, seen, n, "序号必须唯一，否则 finish 会误清别人的登记")
-	})
+	require.NoError(t, err)
+	require.Equal(t, initial.SessionID, again.SessionID)
+	require.Equal(t, "second", again.Img)
+	require.Zero(t, b.saves)
+	b.set("logged_in", "")
+	done, _, err := l.status(ctx)
+	require.NoError(t, err)
+	require.True(t, done.IsLoggedIn)
+	require.Equal(t, 1, b.saves)
+	require.Equal(t, 1, b.closed)
+}
+func TestLoginRefreshesOnlyExpiredChallenge(t *testing.T) {
+	l, b, create := newFakeLogin(t)
+	ctx := context.Background()
+	initial, err := l.get(ctx, create)
+	require.NoError(t, err)
+	b.set("verification_expired", "")
+	status, _, err := l.status(ctx)
+	require.NoError(t, err)
+	require.Empty(t, status.Img)
+	require.Zero(t, b.refreshes)
+	next, err := l.get(ctx, create)
+	require.NoError(t, err)
+	require.Equal(t, initial.SessionID, next.SessionID)
+	require.Equal(t, "data:image/png;base64,new", next.Img)
+	require.Equal(t, 1, b.refreshes)
+	_, err = l.get(ctx, create)
+	require.NoError(t, err)
+	require.Equal(t, 1, b.refreshes)
+}
+func TestLoginDoesNotReportSuccessBeforeCookiesSaved(t *testing.T) {
+	l, b, create := newFakeLogin(t)
+	ctx := context.Background()
+	_, err := l.get(ctx, create)
+	require.NoError(t, err)
+	b.mu.Lock()
+	b.saveErr = errors.New("disk full")
+	b.mu.Unlock()
+	b.set("logged_in", "")
+	res, active, err := l.status(ctx)
+	require.True(t, active)
+	require.ErrorContains(t, err, "保存 cookies 失败")
+	require.Nil(t, res)
+	require.Zero(t, b.closed)
+	b.mu.Lock()
+	b.saveErr = nil
+	b.mu.Unlock()
+	res, _, err = l.status(ctx)
+	require.NoError(t, err)
+	require.True(t, res.IsLoggedIn)
+}
+func TestLoginResetPreventsLateCookieWrite(t *testing.T) {
+	l, b, create := newFakeLogin(t)
+	ctx := context.Background()
+	_, err := l.get(ctx, create)
+	require.NoError(t, err)
+	removed := false
+	require.NoError(t, l.reset(func() error { removed = true; return nil }))
+	require.True(t, removed)
+	b.set("logged_in", "")
+	_, active, err := l.status(ctx)
+	require.NoError(t, err)
+	require.False(t, active)
+	require.Zero(t, b.saves)
+	require.Equal(t, 1, b.closed)
+}
+func TestLoginExpiredAttemptDoesNotSaveAndConcurrentGetsReuse(t *testing.T) {
+	l, b, create := newFakeLogin(t)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := l.get(ctx, create)
+			if err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	require.Equal(t, uint64(1), l.seq)
+	l.mu.Lock()
+	l.active.deadline = time.Now().Add(-time.Second)
+	l.mu.Unlock()
+	b.set("logged_in", "")
+	status, _, err := l.status(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "expired", status.Status)
+	require.False(t, status.IsLoggedIn)
+	require.Zero(t, b.saves)
+}
+func TestLoginMCPReturnsVerificationImageAndNeverExpiredImage(t *testing.T) {
+	r := loginProgressResult(&LoginQrcodeResponse{Status: "verification_required", Message: "请扫码完成二次身份验证", Img: "data:image/png;base64,second", SessionID: 2})
+	require.Len(t, r.Content, 2)
+	require.Contains(t, r.Content[0].Text, "二次身份验证")
+	require.Equal(t, "second", r.Content[1].Data)
+	r = loginProgressResult(&LoginQrcodeResponse{Status: "verification_expired", Img: "data:image/png;base64,stale"})
+	require.Len(t, r.Content, 1)
 }

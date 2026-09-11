@@ -936,3 +936,26 @@ Content-Type: application/json
 - **用途**: 可以通过MCP客户端调用相同的功能
 
 更多MCP协议相关信息请参考 [Model Context Protocol 官方文档](https://modelcontextprotocol.io/)。
+
+
+### 扫码登录与二次身份验证
+
+`GET /api/v1/login/qrcode` 与 `GET /api/v1/login/status` 共用当前扫码会话，后者不会再打开独立浏览器。重复获取二维码不会替换有效会话。
+
+兼容字段 `is_logged_in`、`img` 和 `timeout` 保持不变；登录进度新增 `status`、`message`、`session_id`。状态接口在等待扫码时也可以返回 `img` 和 `timeout`。
+
+| status | 含义及客户端动作 |
+| --- | --- |
+| awaiting_scan | 展示当前登录二维码，等待用户扫码。 |
+| awaiting_confirmation | 网页已收到扫码，等待手机确认；继续轮询状态。 |
+| verification_required | 小红书要求二次身份验证；展示返回的新图片，让用户用已登录的小红书 App 扫码，然后继续轮询。 |
+| verification_expired | 验证二维码已过期；调用获取二维码接口，在原会话中刷新。 |
+| qr_expired | 初次登录二维码过期；调用获取二维码接口刷新。 |
+| logged_in | 网页登录完成且 Cookie 已成功保存。 |
+| expired | 会话等待窗口结束，重新获取登录二维码。 |
+
+初次等待窗口为 4 分钟；首次检测到二次验证时提供新的 4 分钟会话等待窗口，重复轮询不会无限延期。`timeout` 是会话剩余等待时间，不是二维码自身有效期；身份验证二维码按网页提示约 1 分钟过期。过期二维码不返回图片，刷新仅通过网页的正常刷新控件完成。
+
+MCP 客户端应在首次扫码确认后继续调用 `check_login_status`。该工具也可能返回图片内容，必须原样展示给用户。仅收到手机端“登录成功”不足以判定网页登录完成；以服务的 `is_logged_in=true` 或明确已登录结果为准。验证码与身份验证始终由用户手动完成。
+
+删除 Cookie 会同时关闭待扫码浏览器，避免后台会话在重置后写回登录状态。
