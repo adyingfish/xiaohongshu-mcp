@@ -122,7 +122,7 @@ func (p rodDirectMessagePage) Navigate(ctx context.Context, url string) error {
 	if err := page.Navigate(url); err != nil {
 		return err
 	}
-	// Readiness is determined from the conversation UI, not unrelated page resources.
+	// Check the conversation identity separately; the caller retains the page-load barrier.
 	return nil
 }
 func (p rodDirectMessagePage) WaitLoad(ctx context.Context) error {
@@ -192,6 +192,11 @@ func (a *DirectMessageAction) open(ctx context.Context, r DirectMessageRequest) 
 			return s, errors.New("打开的私信会话不是目标收件人，尚未填写或发送")
 		}
 		if s.Ready && s.ConversationReady && s.UserID == r.UserID {
+			// Preserve the existing load barrier before reading recent messages and
+			// deciding whether the proposed text is a duplicate.
+			if err := a.page.WaitLoad(ctx); err != nil {
+				return s, fmt.Errorf("私信页面尚未完成加载（尚未填写或发送）: %w", err)
+			}
 			checked, err := a.page.Run(ctx, "check", r, "")
 			if err != nil {
 				return checked, fmt.Errorf("私信发送前检查失败（尚未填写或发送）: %w", err)

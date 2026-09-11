@@ -190,3 +190,42 @@ if(ids.length===1 && ids[0]==='%s')setTimeout(()=>{
 },80);
 </script>`, markup, dmTestID, handlers, mode)
 }
+
+// A recent message may arrive while initial page resources are still loading.
+// Do not fill/send before the existing page-load barrier and duplicate check.
+func TestDirectMessageHistoryLoadBarrier(t *testing.T) {
+	bin := os.Getenv("DM_TEST_BROWSER")
+	if bin == "" {
+		t.Skip("set DM_TEST_BROWSER for offline browser tests")
+	}
+	l := launcher.New().Bin(bin).Headless(true).NoSandbox(true).Set("disable-background-networking")
+	u, err := l.Launch()
+	require.NoError(t, err)
+	defer l.Cleanup()
+	b := rod.New().ControlURL(u)
+	require.NoError(t, b.Connect())
+	defer b.MustClose()
+	page := b.MustPage("about:blank")
+	defer page.MustClose()
+	router := page.HijackRequests()
+	defer router.MustStop()
+	router.MustAdd("*", func(h *rod.Hijack) {
+		if h.Request.URL().Path == "/history-ready" {
+			time.Sleep(250 * time.Millisecond)
+			h.Response.SetHeader("Content-Type", "text/javascript").SetBody(`const item=document.createElement('div');item.className='chat-item';item.dataset.messageId='already-sent';item.innerHTML='<div class="chat-item__bubble--me"><div class="xhs-im-bubble__text">你好😀</div></div>';document.querySelector('.xhs-im-msg-list').append(item);window.historyReady=true;`)
+			return
+		}
+		h.Response.SetHeader("Content-Type", "text/html; charset=utf-8").SetBody(dmFixtureHTML("sent") + `<script async src="/history-ready"></script>`)
+	})
+	go router.Run()
+	a := NewDirectMessageAction(page)
+	a.pollInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = a.Send(ctx, dmRequest())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "相同")
+	require.True(t, page.MustEval(`() => window.historyReady`).Bool())
+	require.Zero(t, page.MustEval(`() => window.sentCount`).Int())
+	require.Empty(t, page.MustElement(directMessageEditor).MustText())
+}
