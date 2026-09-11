@@ -26,14 +26,18 @@ type fakeDirectMessagePage struct {
 	sendErr          error
 	sendPanic        bool
 	navigations      int
+	lastURL          string
+	neverReady       bool
 	afterSend        bool
 	fill             string
 }
 
-func (f *fakeDirectMessagePage) Navigate(ctx context.Context, _ string) error {
+func (f *fakeDirectMessagePage) Navigate(ctx context.Context, url string) error {
 	f.navigations++
+	f.lastURL = url
 	return ctx.Err()
 }
+func (f *fakeDirectMessagePage) WaitLoad(ctx context.Context) error { return ctx.Err() }
 func (f *fakeDirectMessagePage) Fill(_ context.Context, text string) error {
 	f.calls = append(f.calls, "fill")
 	f.fill = text
@@ -46,6 +50,9 @@ func (f *fakeDirectMessagePage) Run(ctx context.Context, action string, r Direct
 	}
 	switch action {
 	case "snapshot":
+		if f.neverReady {
+			return directMessageState{Ready: true, UserID: r.UserID}, nil
+		}
 		return directMessageState{Ready: true, ConversationReady: true, UserID: r.UserID}, nil
 	case "list":
 		return f.initial, nil
@@ -77,7 +84,7 @@ func (f *fakeDirectMessagePage) Run(ctx context.Context, action string, r Direct
 	return directMessageState{}, errors.New("unexpected action")
 }
 func dmAction(f *fakeDirectMessagePage) *DirectMessageAction {
-	return &DirectMessageAction{page: f, pollInterval: time.Millisecond, ackTimeout: 5 * time.Millisecond}
+	return &DirectMessageAction{page: f, pollInterval: time.Millisecond, openTimeout: 100 * time.Millisecond, ackTimeout: 5 * time.Millisecond}
 }
 func TestDirectMessageValidationBeforeBrowser(t *testing.T) {
 	for _, change := range []func(*DirectMessageRequest){
@@ -108,6 +115,7 @@ func TestDirectMessagePreviewDoesNotFillOrSend(t *testing.T) {
 	require.Equal(t, "preview", result.Status)
 	require.Equal(t, r.Content, result.Content)
 	require.False(t, *result.Sent)
+	require.Equal(t, chatURL+"?openUid="+dmTestID, f.lastURL)
 	require.NotContains(t, f.calls, "fill")
 	require.NotContains(t, f.calls, "send")
 }
@@ -190,4 +198,15 @@ func TestDirectMessageListCoverage(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, result.Complete)
 	require.NotNil(t, result.Conversations)
+}
+
+func TestDirectMessageMissingConversationTimesOutBeforeFill(t *testing.T) {
+	f := &fakeDirectMessagePage{neverReady: true}
+	a := dmAction(f)
+	a.openTimeout = 10 * time.Millisecond
+	_, err := a.Send(context.Background(), dmRequest())
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Contains(t, err.Error(), "尚未填写或发送")
+	require.Empty(t, f.fill)
+	require.NotContains(t, f.calls, "send")
 }

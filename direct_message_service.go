@@ -8,6 +8,8 @@ import (
 )
 
 func (s *XiaohongshuService) ListDirectMessageConversations(ctx context.Context, name string) (*xiaohongshu.DirectMessageConversationList, error) {
+	ctx, cancel := context.WithTimeout(ctx, xiaohongshu.DirectMessageRequestTimeout)
+	defer cancel()
 	b := newBrowser()
 	defer closeDirectMessageBrowser(b.Close)
 	page := b.NewPage()
@@ -18,6 +20,8 @@ func (s *XiaohongshuService) PreviewDirectMessage(ctx context.Context, r xiaohon
 	if err := r.Normalize(false); err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, xiaohongshu.DirectMessageRequestTimeout)
+	defer cancel()
 	b := newBrowser()
 	defer closeDirectMessageBrowser(b.Close)
 	page := b.NewPage()
@@ -33,6 +37,8 @@ func (s *XiaohongshuService) SendDirectMessage(ctx context.Context, r xiaohongsh
 		return nil, errors.New("另一个私信发送请求正在处理；请先核对结果，不要自动重试")
 	}
 	defer s.directMessageMu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, xiaohongshu.DirectMessageRequestTimeout)
+	defer cancel()
 	b := newBrowser()
 	defer closeDirectMessageBrowser(b.Close)
 	page := b.NewPage()

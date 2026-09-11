@@ -45,7 +45,15 @@ SOFTWARE.
     const editor = one('.xhs-im-chat-window .xhs-im-input-bar-editor');
     const active = one('.xhs-im-conv-item--active[data-conv-kind="c2c"]');
     const header = one('.xhs-im-chat-window__header-name');
-    const pathId = location.pathname.match(/^\/chat\/([0-9a-fA-F]{24})\/?$/)?.[1] || '';
+    const pathId = location.pathname.match(/^\/chat\/([0-9a-fA-F]{24})\/?$/)?.[1]?.toLowerCase() || '';
+    const openIds = new URLSearchParams(location.search).getAll('openUid');
+    const openId = openIds.length === 1 && /^[0-9a-fA-F]{24}$/.test(openIds[0]) ?
+        openIds[0].toLowerCase() : '';
+    const queryValid = openIds.length === 0 || (openIds.length === 1 && !!openId);
+    // The URL is an independent identity check, never a substitute for the active
+    // c2c row and both names. Reject ambiguous or conflicting route parameters.
+    const routeId = queryValid && (!pathId || !openId || pathId === openId) ?
+        (pathId || (/^\/chat\/?$/.test(location.pathname) ? openId : '')) : '';
     const outgoing = () => [...document.querySelectorAll('.xhs-im-msg-list .chat-item')]
         .filter(el => el.querySelector('.chat-item__bubble--me'))
         .map(el => ({
@@ -59,8 +67,8 @@ SOFTWARE.
         on_chat_page: onChat,
         ready: onChat && !!one('.xhs-im-view'),
         conversation_ready: !!editor && !!header && !!active &&
-            active.getAttribute('data-conv-id') === pathId,
-        user_id: pathId,
+            !!routeId && active.getAttribute('data-conv-id') === routeId,
+        user_id: routeId,
         recipient: header?.textContent.trim() || '',
         draft: plainText(editor),
         outgoing: params.action === 'check' ? outgoing() : [],
@@ -78,7 +86,7 @@ SOFTWARE.
         return {...state(), conversations};
     }
     const check = () => {
-        if (!onChat || !pathId || pathId !== params.user_id || !active ||
+        if (!onChat || !routeId || routeId !== params.user_id || !active ||
             active.getAttribute('data-conv-id') !== params.user_id ||
             header?.textContent.trim() !== params.expected_name ||
             active.querySelector('.xhs-im-conv-item__name')?.textContent.trim() !==

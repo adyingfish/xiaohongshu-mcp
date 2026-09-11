@@ -65,9 +65,10 @@ function fixture({id = userId, nickname = name, draft = '', disabled = false} = 
     class Event {
         constructor(type, init) { this.type = type; Object.assign(this, init); }
     }
-    const location = {origin: 'https://www.xiaohongshu.com', pathname: `/chat/${userId}`};
+    const location = {origin: 'https://www.xiaohongshu.com', pathname: `/chat/${userId}`, search: ''};
     const context = {
         location,
+        URLSearchParams,
         document: {
             querySelectorAll: selector => nodes[selector] || [],
             querySelector: selector => nodes[selector]?.[0] || null,
@@ -148,4 +149,35 @@ test('匹配会话和正文时只发送一次 Enter，不模拟 Shift 换行', (
     assert.equal(f.editor.events[0].type, 'keydown');
     assert.equal(f.editor.events[0].key, 'Enter');
     assert.equal(f.editor.events[0].shiftKey, false);
+});
+
+test('openUid 新会话仍须同时匹配选中的单人会话与昵称', () => {
+    const f = fixture({draft: content});
+    f.location.pathname = '/chat';
+    f.location.search = `?openUid=${userId}`;
+    assert.equal(f.execute({action: 'snapshot'}).conversation_ready, true);
+    assert.equal(f.execute({action: 'send'}).submitted, true);
+    assert.equal(f.editor.events.length, 1);
+    for (const options of [{id: 'another-id'}, {nickname: '错误昵称'}]) {
+        const wrong = fixture({...options, draft: content});
+        wrong.location.pathname = '/chat';
+        wrong.location.search = `?openUid=${userId}`;
+        assert.match(wrong.execute({action: 'send'}).error, /收件人/);
+        assert.equal(wrong.editor.events.length, 0);
+    }
+});
+
+test('拒绝缺少、重复、非法或与路径冲突的 openUid', () => {
+    for (const [pathname, search] of [
+        ['/chat', ''], ['/chat', '?openUid=wrong'],
+        ['/chat', `?openUid=${userId}&openUid=${userId}`],
+        [`/chat/${userId}`, '?openUid=ffffffffffffffffffffffff'],
+        [`/chat/${userId}`, '?openUid='],
+        ['/chat/invalid', `?openUid=${userId}`],
+    ]) {
+        const f = fixture({draft: content});
+        Object.assign(f.location, {pathname, search});
+        assert.ok(f.execute({action: 'send'}).error);
+        assert.equal(f.editor.events.length, 0);
+    }
 });
