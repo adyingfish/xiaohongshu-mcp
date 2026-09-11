@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
@@ -49,6 +52,9 @@ type loginAttempt struct {
 	seq              uint64
 	deadline         time.Time
 	verificationSeen bool
+	smsID            string
+	smsPending       bool
+	usedCodes        map[[32]byte]bool
 	cancel           context.CancelFunc
 }
 
@@ -90,7 +96,27 @@ func (l *loginSessions) readLocked(ctx context.Context) (*LoginQrcodeResponse, e
 		a.deadline = time.Now().Add(4 * time.Minute)
 		logrus.Infof("登录会话 #%d 需要用户扫码完成二次身份验证", a.seq)
 	}
-	res := &LoginQrcodeResponse{Status: state.Status, Message: state.Message, Img: state.Img, Timeout: time.Until(a.deadline).Round(time.Second).String(), SessionID: a.seq}
+	if state.Status == "sms_required" || state.Status == "sms_error" {
+		if a.smsID == "" {
+			var randomID [16]byte
+			if _, err := rand.Read(randomID[:]); err != nil {
+				return nil, fmt.Errorf("无法创建短信验证标识")
+			}
+			a.smsID = hex.EncodeToString(randomID[:])
+			a.usedCodes = make(map[[32]byte]bool)
+			a.deadline = time.Now().Add(4 * time.Minute)
+			logrus.Infof("登录会话 #%d 需要用户提供短信验证码", a.seq)
+		}
+		if state.Status == "sms_error" {
+			a.smsPending = false
+		}
+	}
+	if a.smsPending && (state.Status == "sms_required" || state.Status == "awaiting_scan" || state.Status == "awaiting_confirmation") {
+		state.Status = "sms_submitted"
+		state.Img = ""
+		state.Message = "短信验证码已提交，正在等待网页登录结果。请调用 check_login_status，不要重复提交验证码。"
+	}
+	res := &LoginQrcodeResponse{Status: state.Status, Message: state.Message, Img: state.Img, Timeout: time.Until(a.deadline).Round(time.Second).String(), SessionID: a.seq, VerificationID: a.smsID}
 	if state.Status == "logged_in" {
 		// The browser is authoritative only after persistence succeeds.
 		if err := a.browser.SaveCookies(); err != nil {
@@ -187,4 +213,41 @@ func (l *loginSessions) observe(ctx context.Context, a *loginAttempt) {
 		}
 		l.mu.Unlock()
 	}
+}
+
+// submitSMS never creates a login page: the code must belong to the active challenge.
+func (l *loginSessions) submitSMS(ctx context.Context, sessionID uint64, verificationID, code string) (*LoginQrcodeResponse, error) {
+	if !xiaohongshu.ValidLoginSMSCode(code) {
+		return nil, fmt.Errorf("短信验证码须为 4 至 8 位数字")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a := l.active
+	if a == nil || sessionID != a.seq || verificationID == "" || verificationID != a.smsID {
+		return nil, fmt.Errorf("短信验证码不属于当前登录会话，请先调用 check_login_status 获取当前验证标识")
+	}
+	state, err := l.readLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if l.active != a || (state.Status != "sms_required" && state.Status != "sms_error") || a.smsPending {
+		return nil, fmt.Errorf("当前会话不在等待短信验证码，请检查登录状态，不要重复提交")
+	}
+	hash := sha256.Sum256([]byte(code))
+	if a.usedCodes[hash] {
+		return nil, fmt.Errorf("该验证码已提交过，不会重复发送，请检查登录状态")
+	}
+	browser, ok := a.browser.(interface {
+		SubmitSMSCode(context.Context, string) error
+	})
+	if !ok {
+		return nil, fmt.Errorf("当前浏览器不支持短信验证码提交")
+	}
+	// Reserve before browser interaction: uncertain results must not be retried automatically.
+	a.usedCodes[hash] = true
+	a.smsPending = true
+	if err := browser.SubmitSMSCode(ctx, code); err != nil {
+		return nil, err
+	}
+	return l.readLocked(ctx)
 }

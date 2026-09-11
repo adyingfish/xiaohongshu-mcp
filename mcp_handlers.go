@@ -44,7 +44,7 @@ func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
 	if status.IsLoggedIn && status.Username != "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("✅ 已登录\n用户名: %s\n\n你可以使用其他功能了。", status.Username)}}}
 	}
-	return loginProgressResult(&LoginQrcodeResponse{IsLoggedIn: status.IsLoggedIn, Status: status.Status, Message: status.Message, Img: status.Img, Timeout: status.Timeout, SessionID: status.SessionID})
+	return loginProgressResult(&LoginQrcodeResponse{IsLoggedIn: status.IsLoggedIn, Status: status.Status, Message: status.Message, Img: status.Img, Timeout: status.Timeout, SessionID: status.SessionID, VerificationID: status.VerificationID})
 }
 
 // Both login tools return the current session's human verification image.
@@ -68,6 +68,9 @@ func loginProgressResult(result *LoginQrcodeResponse) *MCPToolResult {
 	if result.SessionID != 0 {
 		message = fmt.Sprintf("登录会话 #%d，状态：%s\n%s\n后续调用 check_login_status 检查进度。", result.SessionID, result.Status, message)
 	}
+	if result.VerificationID != "" {
+		message += fmt.Sprintf("\n短信验证参数：session_id=%d，verification_id=%s。仅在用户提供本次短信验证码后调用 submit_login_sms_code；不得猜测、自动重试或记录验证码。", result.SessionID, result.VerificationID)
+	}
 	contents := []MCPContent{{Type: "text", Text: message}}
 	if result.Img != "" && result.Status != "qr_expired" && result.Status != "verification_expired" {
 		const prefix = "data:image/png;base64,"
@@ -75,7 +78,7 @@ func loginProgressResult(result *LoginQrcodeResponse) *MCPToolResult {
 			contents = append(contents, MCPContent{Type: "image", MimeType: "image/png", Data: strings.TrimPrefix(result.Img, prefix)})
 		}
 	}
-	return &MCPToolResult{Content: contents}
+	return &MCPToolResult{Content: contents, IsError: result.Status == "sms_error"}
 }
 
 // handleDeleteCookies 处理删除 cookies 请求，用于登录重置

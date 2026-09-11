@@ -25,6 +25,8 @@ Token 缺失或无效时，接口返回 HTTP `401 Unauthorized`。命令行参�
 
 ## 扫码登录与二次身份验证
 
+二次扫码后如需短信身份验证，参见 [短信验证流程及提交接口](login-sms.md)。
+
 `GET /api/v1/login/qrcode` 与 `GET /api/v1/login/status` 共用当前扫码会话，后者不会再打开独立浏览器。重复获取二维码不会替换有效会话。
 
 兼容字段 `is_logged_in`、`img` 和 `timeout` 保持不变；登录进度新增 `status`、`message`、`session_id`。状态接口在等待扫码时也可以返回 `img` 和 `timeout`。

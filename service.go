@@ -42,24 +42,26 @@ type PublishRequest struct {
 
 // LoginStatusResponse 登录状态响应
 type LoginStatusResponse struct {
-	Status     string `json:"status,omitempty"`
-	Message    string `json:"message,omitempty"`
-	Img        string `json:"img,omitempty"`
-	Timeout    string `json:"timeout,omitempty"`
-	SessionID  uint64 `json:"session_id,omitempty"`
-	IsLoggedIn bool   `json:"is_logged_in"`
-	Username   string `json:"username,omitempty"` // 当前登录账号的昵称
-	UserID     string `json:"user_id,omitempty"`  // 用户唯一标识（个人主页 URL 中的 ID）
+	VerificationID string `json:"verification_id,omitempty"`
+	Status         string `json:"status,omitempty"`
+	Message        string `json:"message,omitempty"`
+	Img            string `json:"img,omitempty"`
+	Timeout        string `json:"timeout,omitempty"`
+	SessionID      uint64 `json:"session_id,omitempty"`
+	IsLoggedIn     bool   `json:"is_logged_in"`
+	Username       string `json:"username,omitempty"` // 当前登录账号的昵称
+	UserID         string `json:"user_id,omitempty"`  // 用户唯一标识（个人主页 URL 中的 ID）
 }
 
 // LoginQrcodeResponse 登录扫码二维码
 type LoginQrcodeResponse struct {
-	Status     string `json:"status,omitempty"`
-	Message    string `json:"message,omitempty"`
-	SessionID  uint64 `json:"session_id,omitempty"`
-	Timeout    string `json:"timeout"`
-	IsLoggedIn bool   `json:"is_logged_in"`
-	Img        string `json:"img,omitempty"`
+	VerificationID string `json:"verification_id,omitempty"`
+	Status         string `json:"status,omitempty"`
+	Message        string `json:"message,omitempty"`
+	SessionID      uint64 `json:"session_id,omitempty"`
+	Timeout        string `json:"timeout"`
+	IsLoggedIn     bool   `json:"is_logged_in"`
+	Img            string `json:"img,omitempty"`
 }
 
 // PublishResponse 发布响应
@@ -115,7 +117,7 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 		if err != nil {
 			return nil, err
 		}
-		return &LoginStatusResponse{IsLoggedIn: progress.IsLoggedIn, Status: progress.Status, Message: progress.Message, Img: progress.Img, Timeout: progress.Timeout, SessionID: progress.SessionID}, nil
+		return &LoginStatusResponse{IsLoggedIn: progress.IsLoggedIn, Status: progress.Status, Message: progress.Message, Img: progress.Img, Timeout: progress.Timeout, SessionID: progress.SessionID, VerificationID: progress.VerificationID}, nil
 	}
 
 	b := newBrowser()

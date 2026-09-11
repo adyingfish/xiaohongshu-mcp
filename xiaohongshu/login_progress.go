@@ -5,11 +5,17 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
 //go:embed login_state.js
-var loginStateScript string
+var loginStateTemplate string
+
+//go:embed login_sms.js
+var loginSMSLocator string
+
+var loginStateScript = strings.Replace(loginStateTemplate, "__SMS_LOCATOR__", loginSMSLocator, 1)
 
 type LoginPageState struct {
 	Status  string `json:"status"`
@@ -65,7 +71,7 @@ func (a *LoginAction) OpenLoginPage(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		state, err := a.ReadState(ctx)
-		if err == nil && (state.Img != "" || state.Status == "logged_in" || state.Status == "verification_required" || state.Status == "verification_expired") {
+		if err == nil && (state.Img != "" || state.Status == "logged_in" || state.Status == "verification_required" || state.Status == "verification_expired" || state.Status == "sms_required" || state.Status == "sms_error") {
 			return nil
 		}
 		select {
