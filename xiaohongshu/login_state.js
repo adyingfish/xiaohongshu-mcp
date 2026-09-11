@@ -1,6 +1,16 @@
 () => {
   const visible = el => !!el && el.getBoundingClientRect().width > 0 &&
     el.getBoundingClientRect().height > 0 && getComputedStyle(el).visibility !== 'hidden';
+  const sms = (__SMS_LOCATOR__)();
+  if (sms) {
+    const text = sms.dialog.innerText;
+    const masked = text.match(/(?:\+\d{1,3}\s*)?\d{2,3}\*{3,}\d{2,4}/)?.[0] || '';
+    const failed = /验证码错误|验证码不正确|验证码已过期|验证码失效|校验失败|验证失败|操作频繁|稍后再试/.test(text);
+    return JSON.stringify({status: failed ? 'sms_error' : 'sms_required',
+      message: failed ? '短信验证码校验失败或已过期，请核对验证码；不要自动重试。' :
+        '小红书要求短信验证码验证。' + (masked ? '验证码已发送至 ' + masked + '。' : '') +
+        '请向用户索取本次短信验证码，再调用 submit_login_sms_code 提交；不要再次获取登录二维码。'});
+  }
   const images = [...document.querySelectorAll('img.qrcode-img')].filter(visible);
   // The verification dialog and initial login dialog both use .qrcode-img.
   // Select the image inside its own identity-verification dialog, never the first image.
