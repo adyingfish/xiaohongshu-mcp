@@ -1,42 +1,190 @@
 package main
 
-import "sync"
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
 
-// loginSessions 管理「已发出二维码、还在等扫码」的登录会话。
-//
-// 取一次二维码就要留一个浏览器活着等扫码，否则检测不到登录、也存不了 cookie。
-// 但没有任何东西拦着重复调用，于是每调一次就多一个浏览器活到超时为止。
-// 这里的约束是：同一时刻只保留一个待扫码会话，开新的就把旧的关掉。
+	"github.com/go-rod/rod"
+	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
+)
+
+type loginBrowser interface {
+	ReadState(context.Context) (xiaohongshu.LoginPageState, error)
+	RefreshQrcode(context.Context) error
+	SaveCookies() error
+	Close()
+}
+
+type browserLogin struct {
+	*xiaohongshu.LoginAction
+	page  *rod.Page
+	close func()
+}
+
+func (b *browserLogin) SaveCookies() error { return saveCookies(b.page) }
+func (b *browserLogin) Close()             { b.close() }
+
+func newLoginBrowser(ctx context.Context) (loginBrowser, error) {
+	b := newBrowser()
+	success := false
+	defer func() {
+		if !success {
+			b.Close()
+		}
+	}()
+	page := b.NewPage()
+	action := xiaohongshu.NewLogin(page)
+	if err := action.OpenLoginPage(ctx); err != nil {
+		return nil, err
+	}
+	success = true
+	return &browserLogin{LoginAction: action, page: page, close: func() { _ = page.Close(); b.Close() }}, nil
+}
+
+type loginAttempt struct {
+	browser          loginBrowser
+	seq              uint64
+	deadline         time.Time
+	verificationSeen bool
+	cancel           context.CancelFunc
+}
+
+// One lock serializes all browser access and cookie writes with reset/expiry.
+// Polling and requesting a QR share this attempt; neither creates a second browser.
 type loginSessions struct {
 	mu     sync.Mutex
 	seq    uint64
-	cancel func()
+	active *loginAttempt
 }
 
-// start 结束上一个待扫码会话（如果有），登记新的，返回本次会话的序号。
-// 序号用于 finish 判断自己是不是仍然是当前会话。
-func (l *loginSessions) start(cancel func()) uint64 {
-	l.mu.Lock()
-	prev := l.cancel
-	l.seq++
-	seq := l.seq
-	l.cancel = cancel
-	l.mu.Unlock()
-
-	// 放到锁外调用：取消动作会触发对方 goroutine 的收尾，避免相互等待
-	if prev != nil {
-		prev()
+func (l *loginSessions) closeLocked() {
+	if a := l.active; a != nil {
+		l.active = nil
+		a.cancel()
+		a.browser.Close()
 	}
-	return seq
 }
 
-// finish 会话自己结束时清理登记。仅当它仍是当前会话才清，
-// 否则会把后来者的登记抹掉，导致后来者永远不会被 start 关闭。
-func (l *loginSessions) finish(seq uint64) {
+func (l *loginSessions) reset(remove func() error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.closeLocked()
+	return remove()
+}
 
-	if l.seq == seq {
-		l.cancel = nil
+func (l *loginSessions) readLocked(ctx context.Context) (*LoginQrcodeResponse, error) {
+	a := l.active
+	if time.Now().After(a.deadline) {
+		l.closeLocked()
+		return &LoginQrcodeResponse{Status: "expired", Message: "登录会话已超时，请重新获取登录二维码。", Timeout: "0s"}, nil
+	}
+	state, err := a.browser.ReadState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if (state.Status == "verification_required" || state.Status == "verification_expired") && !a.verificationSeen {
+		a.verificationSeen = true
+		a.deadline = time.Now().Add(4 * time.Minute)
+		logrus.Infof("登录会话 #%d 需要用户扫码完成二次身份验证", a.seq)
+	}
+	res := &LoginQrcodeResponse{Status: state.Status, Message: state.Message, Img: state.Img, Timeout: time.Until(a.deadline).Round(time.Second).String(), SessionID: a.seq}
+	if state.Status == "logged_in" {
+		// The browser is authoritative only after persistence succeeds.
+		if err := a.browser.SaveCookies(); err != nil {
+			// Preserve this browser so a subsequent poll can retry the local disk write.
+			logrus.Errorf("扫码成功但保存 cookies 失败，会话 #%d: %v", a.seq, err)
+			return nil, fmt.Errorf("网页登录成功，但保存 cookies 失败: %w", err)
+		}
+		res.IsLoggedIn = true
+		res.Timeout = "0s"
+		logrus.Infof("扫码登录成功，cookies 已保存，会话 #%d", a.seq)
+		l.closeLocked()
+	}
+	return res, nil
+}
+
+func (l *loginSessions) status(ctx context.Context) (*LoginQrcodeResponse, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.active == nil {
+		return nil, false, nil
+	}
+	res, err := l.readLocked(ctx)
+	return res, true, err
+}
+
+func (l *loginSessions) get(ctx context.Context, create func(context.Context) (loginBrowser, error)) (*LoginQrcodeResponse, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.active != nil && time.Now().After(l.active.deadline) {
+		l.closeLocked()
+	}
+	if l.active == nil {
+		initCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+		b, err := create(initCtx)
+		if err != nil {
+			return nil, err
+		}
+		l.seq++
+		bg, cancelBG := context.WithCancel(context.Background())
+		a := &loginAttempt{browser: b, seq: l.seq, deadline: time.Now().Add(4 * time.Minute), cancel: cancelBG}
+		l.active = a
+		logrus.Infof("等待扫码登录，会话 #%d，超时 4m0s", a.seq)
+		go l.observe(bg, a)
+	}
+	res, err := l.readLocked(ctx)
+	if err != nil || l.active == nil {
+		return res, err
+	}
+	if res.Status == "verification_expired" || res.Status == "qr_expired" {
+		a := l.active
+		if err := a.browser.RefreshQrcode(ctx); err != nil {
+			return nil, err
+		}
+		// Do not hand out the expired image while the refresh request is in flight.
+		deadline := time.NewTimer(8 * time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-deadline.C:
+				return res, nil
+			case <-ticker.C:
+				res, err = l.readLocked(ctx)
+				if err != nil || l.active == nil || (res.Status != "verification_expired" && res.Status != "qr_expired") {
+					return res, err
+				}
+			}
+		}
+	}
+	return res, nil
+}
+
+func (l *loginSessions) observe(ctx context.Context, a *loginAttempt) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		l.mu.Lock()
+		if l.active != a {
+			l.mu.Unlock()
+			return
+		}
+		_, err := l.readLocked(ctx)
+		if err != nil && ctx.Err() == nil {
+			logrus.Warnf("读取登录会话 #%d 状态失败: %v", a.seq, err)
+		}
+		l.mu.Unlock()
 	}
 }
