@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 )
 
 const dmTestID = "0123456789abcdef01234567"
@@ -77,7 +78,72 @@ func (f *fakeDirectMessagePage) Run(ctx context.Context, action string, r Direct
 	return directMessageState{}, errors.New("unexpected action")
 }
 func dmAction(f *fakeDirectMessagePage) *DirectMessageAction {
-	return &DirectMessageAction{page: f, pollInterval: time.Millisecond, ackTimeout: 5 * time.Millisecond}
+	return &DirectMessageAction{page: f, pollInterval: time.Millisecond, ackTimeout: 5 * time.Millisecond, delay: func(context.Context, humanize.Action) {}}
+}
+
+func TestDirectMessageCancellationDuringPauseDoesNotSubmit(t *testing.T) {
+	for _, phase := range []humanize.Action{humanize.Reading, humanize.AfterType, humanize.BeforeSubmit} {
+		t.Run(string(phase), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f := &fakeDirectMessagePage{}
+			a := dmAction(f)
+			a.delay = func(_ context.Context, action humanize.Action) {
+				if action == phase {
+					cancel()
+				}
+			}
+			result, err := a.Send(ctx, dmRequest())
+			require.ErrorIs(t, err, context.Canceled)
+			require.Nil(t, result)
+			require.NotContains(t, f.calls, "send")
+			if phase == humanize.Reading {
+				require.Empty(t, f.fill)
+			}
+		})
+	}
+}
+
+func TestDirectMessageRechecksAfterReading(t *testing.T) {
+	for _, change := range []func(*fakeDirectMessagePage){
+		func(f *fakeDirectMessagePage) { f.checkErr = errors.New("收件人变化") },
+		func(f *fakeDirectMessagePage) { f.initial.Draft = "新草稿" },
+		func(f *fakeDirectMessagePage) {
+			f.initial.Outgoing = []directMessageItem{{MessageID: "new", Text: dmRequest().Content}}
+		},
+	} {
+		f := &fakeDirectMessagePage{}
+		a := dmAction(f)
+		a.delay = func(_ context.Context, action humanize.Action) {
+			if action == humanize.Reading {
+				change(f)
+			}
+		}
+		_, err := a.Send(context.Background(), dmRequest())
+		require.Error(t, err)
+		require.Empty(t, f.fill)
+		require.NotContains(t, f.calls, "send")
+	}
+}
+
+func TestDirectMessageCancellationAfterAcknowledgementPreservesSent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := &fakeDirectMessagePage{states: []directMessageState{{Outgoing: []directMessageItem{
+		{MessageID: "new", StoreID: "1", Text: dmRequest().Content},
+	}}}}
+	a := dmAction(f)
+	a.delay = func(_ context.Context, action humanize.Action) {
+		if action == humanize.AfterInteract {
+			require.True(t, f.afterSend)
+			cancel()
+		}
+	}
+	result, err := a.Send(ctx, dmRequest())
+	require.NoError(t, err)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.Equal(t, "sent", result.Status)
+	require.True(t, *result.Sent)
 }
 func TestDirectMessageValidationBeforeBrowser(t *testing.T) {
 	for _, change := range []func(*DirectMessageRequest){

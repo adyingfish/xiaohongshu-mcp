@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-rod/rod"
+	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 )
 
 //go:embed direct_message.js
@@ -144,17 +145,27 @@ func (p rodDirectMessagePage) Fill(ctx context.Context, text string) error {
 	if err != nil {
 		return err
 	}
-	return editor.Input(text)
+	return humanize.Type(ctx, editor, text)
 }
 
 type DirectMessageAction struct {
 	page         directMessagePage
 	pollInterval time.Duration
 	ackTimeout   time.Duration
+	delay        func(context.Context, humanize.Action)
 }
 
 func NewDirectMessageAction(page *rod.Page) *DirectMessageAction {
-	return &DirectMessageAction{page: rodDirectMessagePage{page}, pollInterval: 500 * time.Millisecond, ackTimeout: 20 * time.Second}
+	return &DirectMessageAction{page: rodDirectMessagePage{page}, pollInterval: 500 * time.Millisecond, ackTimeout: 20 * time.Second, delay: humanize.Delay}
+}
+
+// 拟人停顿与状态轮询分开；取消发生在发送前时，不进入结果未知的发送阶段。
+func (a *DirectMessageAction) pause(ctx context.Context, action humanize.Action) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	a.delay(ctx, action)
+	return ctx.Err()
 }
 func (a *DirectMessageAction) wait(ctx context.Context) error {
 	timer := time.NewTimer(a.pollInterval)
@@ -239,9 +250,22 @@ func (a *DirectMessageAction) Send(ctx context.Context, r DirectMessageRequest) 
 	if err := r.Normalize(true); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	// 逐字输入需要额外时间，按每字停顿上限预留；调用方更短的期限仍然有效。
+	typingBudget := time.Duration(utf8.RuneCountInString(r.Content)) * humanize.DefaultProvider{}.Timing()[humanize.Keystroke].Max
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second+typingBudget)
 	defer cancel()
 	s, err := a.open(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDirectMessageDraft(s, r.Content); err != nil {
+		return nil, err
+	}
+	if err := a.pause(ctx, humanize.Reading); err != nil {
+		return nil, err
+	}
+	// 阅读停顿期间可能切换会话或出现新草稿，填写前重新核对。
+	s, err = a.page.Run(ctx, "check", r, "")
 	if err != nil {
 		return nil, err
 	}
@@ -253,8 +277,19 @@ func (a *DirectMessageAction) Send(ctx context.Context, r DirectMessageRequest) 
 		if err := a.page.Fill(ctx, r.Content); err != nil {
 			return nil, err
 		}
+		if err := a.pause(ctx, humanize.AfterType); err != nil {
+			return nil, err
+		}
 	}
-	return a.submit(ctx, r), nil
+	if err := a.pause(ctx, humanize.BeforeSubmit); err != nil {
+		return nil, err
+	}
+	result := a.submit(ctx, r)
+	if result.Status == "sent" {
+		// 先确认发送，再停顿；停顿期间取消不能覆盖已经确认的结果。
+		_ = a.pause(ctx, humanize.AfterInteract)
+	}
+	return result, nil
 }
 func (a *DirectMessageAction) submit(ctx context.Context, r DirectMessageRequest) (result *DirectMessageResult) {
 	result = messageResult(r, "unknown")
