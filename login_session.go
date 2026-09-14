@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -54,6 +55,7 @@ type loginAttempt struct {
 	verificationSeen bool
 	smsID            string
 	smsPending       bool
+	smsUnknown       bool
 	usedCodes        map[[32]byte]bool
 	cancel           context.CancelFunc
 }
@@ -109,12 +111,17 @@ func (l *loginSessions) readLocked(ctx context.Context) (*LoginQrcodeResponse, e
 		}
 		if state.Status == "sms_error" {
 			a.smsPending = false
+			a.smsUnknown = false
 		}
 	}
 	if a.smsPending && (state.Status == "sms_required" || state.Status == "awaiting_scan" || state.Status == "awaiting_confirmation") {
 		state.Status = "sms_submitted"
 		state.Img = ""
-		state.Message = "短信验证码已提交，正在等待网页登录结果。请调用 check_login_status，不要重复提交验证码。"
+		state.Message = "已点击短信验证按钮，正在等待网页登录结果。请调用 check_login_status，不要重复提交验证码。"
+		if a.smsUnknown {
+			state.Status = "sms_submit_unknown"
+			state.Message = "无法确认短信验证按钮是否已点击。请调用 check_login_status 检查结果，不要重复提交验证码；会话超时后重新登录。"
+		}
 	}
 	res := &LoginQrcodeResponse{Status: state.Status, Message: state.Message, Img: state.Img, Timeout: time.Until(a.deadline).Round(time.Second).String(), SessionID: a.seq, VerificationID: a.smsID}
 	if state.Status == "logged_in" {
@@ -247,6 +254,14 @@ func (l *loginSessions) submitSMS(ctx context.Context, sessionID uint64, verific
 	a.usedCodes[hash] = true
 	a.smsPending = true
 	if err := browser.SubmitSMSCode(ctx, code); err != nil {
+		if errors.Is(err, xiaohongshu.ErrSMSNotSubmitted) {
+			// The browser guarantees it did not attempt a click. Keep the challenge usable.
+			a.smsPending = false
+			delete(a.usedCodes, hash)
+		} else {
+			// A lost browser response may follow a click. Preserve deduplication without claiming success.
+			a.smsUnknown = true
+		}
 		return nil, err
 	}
 	return l.readLocked(ctx)
