@@ -48,7 +48,7 @@ func registerDirectMessageTools(server *mcp.Server, app *AppServer) {
 	}))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "send_direct_message",
-		Description: "向已有会话或陌生人发送一条单人文字私信，必须先获得用户对收件人与正文的授权并设置confirm=true。核对ID与完整昵称，拒绝最近同文消息，仅发送一次。sent代表服务端确认，不代表已读；failed/unknown均不得自动重试，须先核对会话。",
+		Description: "向已有会话或陌生人发送一条单人文字私信，正文逐字输入，长消息请将客户端调用超时设为至少480秒；必须先获得用户对收件人与正文的授权并设置confirm=true。核对ID与完整昵称，拒绝最近同文消息，仅发送一次。sent代表服务端确认，不代表已读；failed/unknown均不得自动重试，须先核对会话。",
 		Annotations: &mcp.ToolAnnotations{Title: "发送私信", DestructiveHint: boolPtr(true), IdempotentHint: false},
 	}, withPanicRecovery("send_direct_message", func(ctx context.Context, _ *mcp.CallToolRequest, args xiaohongshu.DirectMessageRequest) (*mcp.CallToolResult, any, error) {
 		result, err := app.xiaohongshuService.SendDirectMessage(ctx, args)

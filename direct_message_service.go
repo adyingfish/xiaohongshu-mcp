@@ -37,7 +37,7 @@ func (s *XiaohongshuService) SendDirectMessage(ctx context.Context, r xiaohongsh
 		return nil, errors.New("另一个私信发送请求正在处理；请先核对结果，不要自动重试")
 	}
 	defer s.directMessageMu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, xiaohongshu.DirectMessageRequestTimeout)
+	ctx, cancel := xiaohongshu.DirectMessageSendContext(ctx, r.Content)
 	defer cancel()
 	b := newBrowser()
 	defer closeDirectMessageBrowser(b.Close)
