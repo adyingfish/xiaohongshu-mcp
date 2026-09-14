@@ -40,7 +40,7 @@ func registerDirectMessageTools(server *mcp.Server, app *AppServer) {
 	}))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "preview_direct_message",
-		Description: "核对单人私信收件人ID、完整昵称、可发送状态与正文，返回预览；不填写或发送，不保留跨请求草稿。打开会话可能自然标为已读。",
+		Description: "打开已有或陌生人的单人私信会话，核对收件人ID、完整昵称、可发送状态与正文，返回预览；不填写或发送，不保留跨请求草稿。打开会话可能自然标为已读。",
 		Annotations: &mcp.ToolAnnotations{Title: "预览私信", DestructiveHint: boolPtr(false)},
 	}, withPanicRecovery("preview_direct_message", func(ctx context.Context, _ *mcp.CallToolRequest, args xiaohongshu.DirectMessageRequest) (*mcp.CallToolResult, any, error) {
 		result, err := app.xiaohongshuService.PreviewDirectMessage(ctx, args)
@@ -48,7 +48,7 @@ func registerDirectMessageTools(server *mcp.Server, app *AppServer) {
 	}))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "send_direct_message",
-		Description: "发送一条单人文字私信，必须先获得用户对收件人与正文的授权并设置confirm=true。核对ID与完整昵称，拒绝最近同文消息，仅发送一次。sent代表服务端确认，不代表已读；failed/unknown均不得自动重试，须先核对会话。",
+		Description: "向已有会话或陌生人发送一条单人文字私信，正文逐字输入，长消息请将客户端调用超时设为至少480秒；必须先获得用户对收件人与正文的授权并设置confirm=true。核对ID与完整昵称，拒绝最近同文消息，仅发送一次。sent代表服务端确认，不代表已读；failed/unknown均不得自动重试，须先核对会话。",
 		Annotations: &mcp.ToolAnnotations{Title: "发送私信", DestructiveHint: boolPtr(true), IdempotentHint: false},
 	}, withPanicRecovery("send_direct_message", func(ctx context.Context, _ *mcp.CallToolRequest, args xiaohongshu.DirectMessageRequest) (*mcp.CallToolResult, any, error) {
 		result, err := app.xiaohongshuService.SendDirectMessage(ctx, args)

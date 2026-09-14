@@ -45,7 +45,7 @@ func TestDirectMessageBrowserFixture(t *testing.T) {
 			router := page.HijackRequests()
 			defer router.MustStop()
 			router.MustAdd("*", func(h *rod.Hijack) {
-				h.Response.SetHeader("Content-Type", "text/html; charset=utf-8").SetBody(dmFixtureHTML(mode))
+				h.Response.SetHeader("Content-Type", "text/html; charset=utf-8").SetBody(strings.Replace(dmFixtureHTML(mode), "<script>", "<script>history.replaceState(null, '', '/chat/"+dmTestID+"');", 1))
 			})
 			go router.Run()
 			a := NewDirectMessageAction(page)
@@ -164,4 +164,132 @@ func dmFixtureHTML(mode string) string {
  const bubble=document.createElement('div');bubble.className='chat-item__bubble--me';const text=document.createElement('div');text.className='xhs-im-bubble__text';text.textContent=editor.innerText;bubble.append(text);item.append(bubble);
  const mode='%s';if(mode==='failed'||mode==='pending'){const status=document.createElement('div');status.className=mode==='failed'?'chat-item__status-btn--failed':'chat-item__status-loading';item.append(status);}
  document.querySelector('.xhs-im-msg-list').append(item);editor.textContent='';});</script>`, dmTestID, name, name, draft, mode, store, mode)
+}
+
+// A new recipient has no row, header or editor until the website processes openUid.
+// This fixture deliberately leaves a direct /chat/<id> navigation uninitialized.
+func TestDirectMessageStrangerBrowserFixture(t *testing.T) {
+	bin := os.Getenv("DM_TEST_BROWSER")
+	if bin == "" {
+		t.Skip("set DM_TEST_BROWSER for offline browser tests")
+	}
+	l := launcher.New().Bin(bin).Headless(true).NoSandbox(true).Set("disable-background-networking")
+	u, err := l.Launch()
+	require.NoError(t, err)
+	defer l.Cleanup()
+	b := rod.New().ControlURL(u)
+	require.NoError(t, b.Connect())
+	defer b.MustClose()
+	for _, mode := range []string{"preview", "sent", "failed", "pending", "wrong-name", "disabled", "existing-draft", "changed-before-send"} {
+		t.Run(mode, func(t *testing.T) {
+			page := b.MustPage("about:blank")
+			defer page.MustClose()
+			router := page.HijackRequests()
+			defer router.MustStop()
+			router.MustAdd("*", func(h *rod.Hijack) {
+				h.Response.SetHeader("Content-Type", "text/html; charset=utf-8").SetBody(dmStrangerFixtureHTML(mode))
+			})
+			go router.Run()
+			a := NewDirectMessageAction(page)
+			a.pollInterval = 10 * time.Millisecond
+			a.openTimeout = time.Second
+			a.delay = func(context.Context, humanize.Action) {}
+			a.ackTimeout = 200 * time.Millisecond
+			r := dmRequest()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if mode == "preview" {
+				res, err := a.Preview(ctx, r)
+				require.NoError(t, err)
+				require.Equal(t, "preview", res.Status)
+				require.False(t, *res.Sent)
+				require.Empty(t, page.MustElement(directMessageEditor).MustText())
+			} else {
+				res, err := a.Send(ctx, r)
+				if mode == "wrong-name" || mode == "disabled" || mode == "existing-draft" {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+					want := mode
+					if mode == "pending" || mode == "changed-before-send" {
+						want = "unknown"
+					}
+					require.Equal(t, want, res.Status)
+					if mode == "sent" {
+						require.True(t, *res.Sent)
+						require.Equal(t, "server_message_id", res.Verification)
+					} else if want == "unknown" {
+						require.Nil(t, res.Sent)
+					}
+				}
+			}
+			require.True(t, page.MustEval(`() => window.openedFromQuery`).Bool())
+			require.False(t, page.MustEval(`() => window.targetBeforeOpen`).Bool())
+			wantSends := 0
+			if mode == "sent" || mode == "failed" || mode == "pending" {
+				wantSends = 1
+			}
+			require.Equal(t, wantSends, page.MustEval(`() => window.sentCount`).Int())
+		})
+	}
+}
+
+func dmStrangerFixtureHTML(mode string) string {
+	base := dmFixtureHTML(mode)
+	start := strings.Index(base, `<div class="xhs-im-view">`)
+	end := strings.Index(base, `<script>`)
+	markup := base[start:end]
+	handlers := strings.TrimSuffix(base[end+len(`<script>`):], `</script>`)
+	return fmt.Sprintf(`<!doctype html><meta charset="utf-8"><style>div{min-width:100px;min-height:20px}</style>
+<div id="loading">加载消息</div><template id="new-conversation">%s</template>
+<script>
+window.sentCount=0;window.openedFromQuery=false;window.targetBeforeOpen=!!document.querySelector('[data-conv-id]');
+const ids=new URLSearchParams(location.search).getAll('openUid');
+if(ids.length===1 && ids[0]==='%s')setTimeout(()=>{
+ document.querySelector('#loading').remove();
+ document.body.append(document.querySelector('#new-conversation').content.cloneNode(true));
+ (function(){%s})();
+ if('%s'==='disabled'){document.querySelector('.xhs-im-input-bar-editor').setAttribute('contenteditable','false');}
+ window.openedFromQuery=true;
+},80);
+</script>`, markup, dmTestID, handlers, mode)
+}
+
+// A recent message may arrive while initial page resources are still loading.
+// Do not fill/send before the existing page-load barrier and duplicate check.
+func TestDirectMessageHistoryLoadBarrier(t *testing.T) {
+	bin := os.Getenv("DM_TEST_BROWSER")
+	if bin == "" {
+		t.Skip("set DM_TEST_BROWSER for offline browser tests")
+	}
+	l := launcher.New().Bin(bin).Headless(true).NoSandbox(true).Set("disable-background-networking")
+	u, err := l.Launch()
+	require.NoError(t, err)
+	defer l.Cleanup()
+	b := rod.New().ControlURL(u)
+	require.NoError(t, b.Connect())
+	defer b.MustClose()
+	page := b.MustPage("about:blank")
+	defer page.MustClose()
+	router := page.HijackRequests()
+	defer router.MustStop()
+	router.MustAdd("*", func(h *rod.Hijack) {
+		if h.Request.URL().Path == "/history-ready" {
+			time.Sleep(250 * time.Millisecond)
+			h.Response.SetHeader("Content-Type", "text/javascript").SetBody(`const item=document.createElement('div');item.className='chat-item';item.dataset.messageId='already-sent';item.innerHTML='<div class="chat-item__bubble--me"><div class="xhs-im-bubble__text">你好😀</div></div>';document.querySelector('.xhs-im-msg-list').append(item);window.historyReady=true;`)
+			return
+		}
+		h.Response.SetHeader("Content-Type", "text/html; charset=utf-8").SetBody(dmFixtureHTML("sent") + `<script async src="/history-ready"></script>`)
+	})
+	go router.Run()
+	a := NewDirectMessageAction(page)
+	a.pollInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = a.Send(ctx, dmRequest())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "相同")
+	require.True(t, page.MustEval(`() => window.historyReady`).Bool())
+	require.Zero(t, page.MustEval(`() => window.sentCount`).Int())
+	require.Empty(t, page.MustElement(directMessageEditor).MustText())
 }

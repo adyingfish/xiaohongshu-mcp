@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
@@ -42,59 +41,44 @@ func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
 		}
 	}
 
-	var resultText string
-	if status.IsLoggedIn {
-		resultText = fmt.Sprintf("✅ 已登录\n用户名: %s\n\n你可以使用其他功能了。", status.Username)
-	} else {
-		resultText = "❌ 未登录\n\n请使用 get_login_qrcode 工具获取二维码进行登录。"
+	if status.IsLoggedIn && status.Username != "" {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("✅ 已登录\n用户名: %s\n\n你可以使用其他功能了。", status.Username)}}}
 	}
-
-	return &MCPToolResult{
-		Content: []MCPContent{{
-			Type: "text",
-			Text: resultText,
-		}},
-	}
+	return loginProgressResult(&LoginQrcodeResponse{IsLoggedIn: status.IsLoggedIn, Status: status.Status, Message: status.Message, Img: status.Img, Timeout: status.Timeout, SessionID: status.SessionID, VerificationID: status.VerificationID})
 }
 
-// handleGetLoginQrcode 处理获取登录二维码请求。
-// 返回二维码图片的 Base64 编码和超时时间，供前端展示扫码登录。
+// Both login tools return the current session's human verification image.
 func (s *AppServer) handleGetLoginQrcode(ctx context.Context) *MCPToolResult {
 	logrus.Info("MCP: 获取登录扫码图片")
-
 	result, err := s.xiaohongshuService.GetLoginQrcode(ctx)
 	if err != nil {
-		return &MCPToolResult{
-			Content: []MCPContent{{Type: "text", Text: "获取登录扫码图片失败: " + err.Error()}},
-			IsError: true,
-		}
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "获取登录扫码图片失败: " + err.Error()}}, IsError: true}
 	}
+	return loginProgressResult(result)
+}
 
+func loginProgressResult(result *LoginQrcodeResponse) *MCPToolResult {
 	if result.IsLoggedIn {
-		return &MCPToolResult{
-			Content: []MCPContent{{Type: "text", Text: "你当前已处于登录状态"}},
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "✅ 已登录，登录状态已确认。可以使用其他功能。"}}}
+	}
+	message := result.Message
+	if message == "" {
+		message = "❌ 未登录，请调用 get_login_qrcode 获取登录二维码。"
+	}
+	if result.SessionID != 0 {
+		message = fmt.Sprintf("登录会话 #%d，状态：%s\n%s\n后续调用 check_login_status 检查进度。", result.SessionID, result.Status, message)
+	}
+	if result.VerificationID != "" {
+		message += fmt.Sprintf("\n短信验证参数：session_id=%d，verification_id=%s。仅在用户提供本次短信验证码后调用 submit_login_sms_code；不得猜测、自动重试或记录验证码。", result.SessionID, result.VerificationID)
+	}
+	contents := []MCPContent{{Type: "text", Text: message}}
+	if result.Img != "" && result.Status != "qr_expired" && result.Status != "verification_expired" {
+		const prefix = "data:image/png;base64,"
+		if strings.HasPrefix(result.Img, prefix) {
+			contents = append(contents, MCPContent{Type: "image", MimeType: "image/png", Data: strings.TrimPrefix(result.Img, prefix)})
 		}
 	}
-
-	now := time.Now()
-	deadline := func() string {
-		d, err := time.ParseDuration(result.Timeout)
-		if err != nil {
-			return now.Format("2006-01-02 15:04:05")
-		}
-		return now.Add(d).Format("2006-01-02 15:04:05")
-	}()
-
-	// 已登录：文本 + 图片
-	contents := []MCPContent{
-		{Type: "text", Text: "请用小红书 App 在 " + deadline + " 前扫码登录 👇"},
-		{
-			Type:     "image",
-			MimeType: "image/png",
-			Data:     strings.TrimPrefix(result.Img, "data:image/png;base64,"),
-		},
-	}
-	return &MCPToolResult{Content: contents}
+	return &MCPToolResult{Content: contents, IsError: result.Status == "sms_error"}
 }
 
 // handleDeleteCookies 处理删除 cookies 请求，用于登录重置

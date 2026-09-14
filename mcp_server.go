@@ -177,11 +177,12 @@ func withPanicRecovery[T any](
 
 // registerTools 注册所有 MCP 工具
 func registerTools(server *mcp.Server, appServer *AppServer) {
+	registerLoginSMSTool(server, appServer)
 	// 工具 1: 检查登录状态
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "check_login_status",
-			Description: "检查小红书登录状态",
+			Description: "检查小红书登录状态；有扫码会话时检查同一浏览器，如需要二次身份验证会返回新的二维码图片，请展示给用户扫码后继续检查；如需要短信验证码会返回验证标识，请向用户索取本次验证码并调用 submit_login_sms_code",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Check Login Status",
 				ReadOnlyHint: true,
@@ -197,7 +198,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "get_login_qrcode",
-			Description: "获取登录二维码（返回 Base64 图片和超时时间）",
+			Description: "获取当前登录会话的二维码；重复调用复用会话，过期时在原页面刷新。用户首次确认后必须调用 check_login_status，若返回二次身份验证二维码需继续展示给用户扫码，不能仅凭手机提示认定网页登录成功",
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Get Login QR Code",
 				ReadOnlyHint: true,

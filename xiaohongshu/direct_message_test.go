@@ -3,6 +3,7 @@ package xiaohongshu
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -27,15 +28,25 @@ type fakeDirectMessagePage struct {
 	sendErr          error
 	sendPanic        bool
 	navigations      int
+	lastURL          string
+	neverReady       bool
 	afterSend        bool
 	fill             string
+	fillContext      func(context.Context) error
 }
 
-func (f *fakeDirectMessagePage) Navigate(ctx context.Context, _ string) error {
+func (f *fakeDirectMessagePage) Navigate(ctx context.Context, url string) error {
 	f.navigations++
+	f.lastURL = url
 	return ctx.Err()
 }
-func (f *fakeDirectMessagePage) Fill(_ context.Context, text string) error {
+func (f *fakeDirectMessagePage) WaitLoad(ctx context.Context) error { return ctx.Err() }
+func (f *fakeDirectMessagePage) Fill(ctx context.Context, text string) error {
+	if f.fillContext != nil {
+		if err := f.fillContext(ctx); err != nil {
+			return err
+		}
+	}
 	f.calls = append(f.calls, "fill")
 	f.fill = text
 	return nil
@@ -47,6 +58,9 @@ func (f *fakeDirectMessagePage) Run(ctx context.Context, action string, r Direct
 	}
 	switch action {
 	case "snapshot":
+		if f.neverReady {
+			return directMessageState{Ready: true, UserID: r.UserID}, nil
+		}
 		return directMessageState{Ready: true, ConversationReady: true, UserID: r.UserID}, nil
 	case "list":
 		return f.initial, nil
@@ -78,7 +92,7 @@ func (f *fakeDirectMessagePage) Run(ctx context.Context, action string, r Direct
 	return directMessageState{}, errors.New("unexpected action")
 }
 func dmAction(f *fakeDirectMessagePage) *DirectMessageAction {
-	return &DirectMessageAction{page: f, pollInterval: time.Millisecond, ackTimeout: 5 * time.Millisecond, delay: func(context.Context, humanize.Action) {}}
+	return &DirectMessageAction{page: f, pollInterval: time.Millisecond, openTimeout: 100 * time.Millisecond, ackTimeout: 5 * time.Millisecond, delay: func(context.Context, humanize.Action) {}}
 }
 
 func TestDirectMessageCancellationDuringPauseDoesNotSubmit(t *testing.T) {
@@ -174,6 +188,7 @@ func TestDirectMessagePreviewDoesNotFillOrSend(t *testing.T) {
 	require.Equal(t, "preview", result.Status)
 	require.Equal(t, r.Content, result.Content)
 	require.False(t, *result.Sent)
+	require.Equal(t, chatURL+"?openUid="+dmTestID, f.lastURL)
 	require.NotContains(t, f.calls, "fill")
 	require.NotContains(t, f.calls, "send")
 }
@@ -256,4 +271,55 @@ func TestDirectMessageListCoverage(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, result.Complete)
 	require.NotNil(t, result.Conversations)
+}
+
+func TestDirectMessageMissingConversationTimesOutBeforeFill(t *testing.T) {
+	f := &fakeDirectMessagePage{neverReady: true}
+	a := dmAction(f)
+	a.openTimeout = 10 * time.Millisecond
+	_, err := a.Send(context.Background(), dmRequest())
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Contains(t, err.Error(), "尚未填写或发送")
+	require.Empty(t, f.fill)
+	require.NotContains(t, f.calls, "send")
+}
+
+// 服务入口和动作嵌套后，长正文仍有完整预算，且短调用方期限不能被延长。
+func TestDirectMessageLongInputAcrossServiceAndActionBudgets(t *testing.T) {
+	for _, shortCaller := range []bool{false, true} {
+		t.Run(fmt.Sprint(shortCaller), func(t *testing.T) {
+			r := dmRequest()
+			r.Content = strings.Repeat("文", 1000)
+			parent := context.Background()
+			if shortCaller {
+				var cancel context.CancelFunc
+				parent, cancel = context.WithTimeout(parent, 100*time.Millisecond)
+				defer cancel()
+			}
+			ctx, cancel := DirectMessageSendContext(parent, r.Content)
+			defer cancel()
+			f := &fakeDirectMessagePage{states: []directMessageState{{Outgoing: []directMessageItem{{MessageID: "new", StoreID: "1", Text: r.Content}}}}}
+			f.fillContext = func(fillCtx context.Context) error {
+				deadline, ok := fillCtx.Deadline()
+				require.True(t, ok)
+				if shortCaller {
+					want, _ := parent.Deadline()
+					require.Equal(t, want, deadline)
+					<-fillCtx.Done()
+					return fillCtx.Err()
+				}
+				require.Greater(t, time.Until(deadline), 450*time.Second)
+				return nil
+			}
+			result, err := dmAction(f).Send(ctx, r)
+			if shortCaller {
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				require.Nil(t, result)
+				require.NotContains(t, f.calls, "send")
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, "sent", result.Status)
+			}
+		})
+	}
 }
