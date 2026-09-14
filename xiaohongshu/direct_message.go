@@ -19,6 +19,9 @@ import (
 var directMessageScript string
 
 const chatURL = "https://www.xiaohongshu.com/chat"
+
+// Leave room for transport and browser cleanup before the client's 60-second timeout.
+const DirectMessageRequestTimeout = 50 * time.Second
 const directMessageEditor = ".xhs-im-chat-window .xhs-im-input-bar-editor"
 
 var directMessageUserID = regexp.MustCompile(`^[0-9a-fA-F]{24}$`)
@@ -107,6 +110,7 @@ type directMessageState struct {
 // 小接口让协议状态机可以离线测试，实际导航和输入仍通过 go-rod。
 type directMessagePage interface {
 	Navigate(context.Context, string) error
+	WaitLoad(context.Context) error
 	Run(context.Context, string, DirectMessageRequest, string) (directMessageState, error)
 	Fill(context.Context, string) error
 }
@@ -118,7 +122,11 @@ func (p rodDirectMessagePage) Navigate(ctx context.Context, url string) error {
 	if err := page.Navigate(url); err != nil {
 		return err
 	}
-	return page.WaitLoad()
+	// Check the conversation identity separately; the caller retains the page-load barrier.
+	return nil
+}
+func (p rodDirectMessagePage) WaitLoad(ctx context.Context) error {
+	return p.page.Context(ctx).WaitLoad()
 }
 func (p rodDirectMessagePage) Run(ctx context.Context, action string, r DirectMessageRequest, name string) (directMessageState, error) {
 	var state directMessageState
@@ -150,11 +158,12 @@ func (p rodDirectMessagePage) Fill(ctx context.Context, text string) error {
 type DirectMessageAction struct {
 	page         directMessagePage
 	pollInterval time.Duration
+	openTimeout  time.Duration
 	ackTimeout   time.Duration
 }
 
 func NewDirectMessageAction(page *rod.Page) *DirectMessageAction {
-	return &DirectMessageAction{page: rodDirectMessagePage{page}, pollInterval: 500 * time.Millisecond, ackTimeout: 20 * time.Second}
+	return &DirectMessageAction{page: rodDirectMessagePage{page}, pollInterval: 500 * time.Millisecond, openTimeout: 30 * time.Second, ackTimeout: 20 * time.Second}
 }
 func (a *DirectMessageAction) wait(ctx context.Context) error {
 	timer := time.NewTimer(a.pollInterval)
@@ -167,19 +176,35 @@ func (a *DirectMessageAction) wait(ctx context.Context) error {
 	}
 }
 func (a *DirectMessageAction) open(ctx context.Context, r DirectMessageRequest) (directMessageState, error) {
-	if err := a.page.Navigate(ctx, chatURL+"/"+r.UserID); err != nil {
-		return directMessageState{}, err
+	ctx, cancel := context.WithTimeout(ctx, a.openTimeout)
+	defer cancel()
+	// The official profile button uses openUid to initialize a conversation even
+	// when the recipient has no existing entry in the recent-conversation list.
+	if err := a.page.Navigate(ctx, chatURL+"?openUid="+r.UserID); err != nil {
+		return directMessageState{}, fmt.Errorf("打开私信会话失败（尚未填写或发送）: %w", err)
 	}
 	for {
 		s, err := a.page.Run(ctx, "snapshot", r, "")
 		if err != nil {
-			return s, err
+			return s, fmt.Errorf("检查私信会话失败（尚未填写或发送）: %w", err)
+		}
+		if s.Ready && s.UserID != "" && s.UserID != r.UserID {
+			return s, errors.New("打开的私信会话不是目标收件人，尚未填写或发送")
 		}
 		if s.Ready && s.ConversationReady && s.UserID == r.UserID {
-			return a.page.Run(ctx, "check", r, "")
+			// Preserve the existing load barrier before reading recent messages and
+			// deciding whether the proposed text is a duplicate.
+			if err := a.page.WaitLoad(ctx); err != nil {
+				return s, fmt.Errorf("私信页面尚未完成加载（尚未填写或发送）: %w", err)
+			}
+			checked, err := a.page.Run(ctx, "check", r, "")
+			if err != nil {
+				return checked, fmt.Errorf("私信发送前检查失败（尚未填写或发送）: %w", err)
+			}
+			return checked, nil
 		}
 		if err := a.wait(ctx); err != nil {
-			return s, fmt.Errorf("私信会话未就绪: %w", err)
+			return s, fmt.Errorf("私信会话未就绪（尚未填写或发送）: %w", err)
 		}
 	}
 }
@@ -187,6 +212,11 @@ func (a *DirectMessageAction) List(ctx context.Context, name string) (*DirectMes
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	if err := a.page.Navigate(ctx, chatURL); err != nil {
+		return nil, err
+	}
+	// Keep the list's existing load barrier; opening a recipient instead waits
+	// for its independently verified conversation controls.
+	if err := a.page.WaitLoad(ctx); err != nil {
 		return nil, err
 	}
 	for {
@@ -239,7 +269,7 @@ func (a *DirectMessageAction) Send(ctx context.Context, r DirectMessageRequest) 
 	if err := r.Normalize(true); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, DirectMessageRequestTimeout)
 	defer cancel()
 	s, err := a.open(ctx, r)
 	if err != nil {
