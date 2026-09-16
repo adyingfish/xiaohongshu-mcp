@@ -351,6 +351,7 @@ func TestDirectMessageBlockTextBrowserFixture(t *testing.T) {
 		{"<div>第一行</div><div><br></div><div><br></div><div>第二行😀</div>", "第一行\n\n\n第二行😀"},
 		{"<p>中文<span>😀</span></p><p><br></p><p>末行</p>", "中文😀\n\n末行"},
 		{"首行<br><br>末行", "首行\n\n末行"},
+		{"首行<span>中间<br></span>末行", "首行中间\n末行"},
 		{"<div><br></div>", ""},
 	} {
 		page.MustEval(`html => document.querySelector('.xhs-im-input-bar-editor').innerHTML = html`, tc.html)

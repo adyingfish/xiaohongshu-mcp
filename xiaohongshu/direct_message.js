@@ -50,7 +50,8 @@ SOFTWARE.
                     else if (node.nodeName === 'IMG') inline += node.alt || '\uFFFC';
                     else if (node.nodeName === 'BR') {
                         // The terminal BR keeps the caret on an otherwise empty line.
-                        if (node !== parent.lastChild) inline += '\n';
+                        const blockParent = parent === el || /^(DIV|P)$/.test(parent.nodeName);
+                        if (!blockParent || node !== parent.lastChild) inline += '\n';
                     } else if (node.nodeType === Node.ELEMENT_NODE) inline += read(node);
                 }
             }
