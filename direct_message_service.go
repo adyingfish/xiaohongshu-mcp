@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/sirupsen/logrus"
 
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
@@ -43,7 +44,15 @@ func (s *XiaohongshuService) SendDirectMessage(ctx context.Context, r xiaohongsh
 	defer closeDirectMessageBrowser(b.Close)
 	page := b.NewPage()
 	defer page.Close()
-	return xiaohongshu.NewDirectMessageAction(page).Send(ctx, r)
+	result, err := xiaohongshu.NewDirectMessageAction(page).Send(ctx, r)
+	if err != nil {
+		// The action returns errors only before submit; submit always returns a
+		// classified result, including transport failures with uncertain delivery.
+		sent := false
+		logrus.WithField("stage", "pre_submit_error").Info("direct_message_result")
+		return &xiaohongshu.DirectMessageResult{Status: "failed", Sent: &sent, UserID: r.UserID, Recipient: r.ExpectedName, Stage: "pre_submit_error", Error: err.Error(), ReadMayMarkSeen: true}, nil
+	}
+	return result, nil
 }
 
 // 底层 Close 使用 MustClose；清理异常不能覆盖发送后已有的 sent/unknown 结果。

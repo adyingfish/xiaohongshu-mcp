@@ -62,12 +62,27 @@ func TestDirectMessageMCPRegistrationAndNoConfirmation(t *testing.T) {
 }
 func TestDirectMessageUnknownToolResultIsError(t *testing.T) {
 	for _, status := range []string{"unknown", "failed", "sent"} {
-		result, _, err := directMessageToolResult(&xiaohongshu.DirectMessageResult{Status: status, Success: status == "sent"}, nil)
+		sent := status == "sent"
+		input := &xiaohongshu.DirectMessageResult{Status: status, Success: sent, Sent: &sent, Stage: "test_stage", Error: "测试原因"}
+		if status == "unknown" {
+			input.Sent = nil
+		}
+		result, _, err := directMessageToolResult(input, nil)
 		require.NoError(t, err)
 		require.Equal(t, status != "sent", result.IsError)
 		var data map[string]any
 		require.NoError(t, json.Unmarshal([]byte(result.Content[0].(*mcp.TextContent).Text), &data))
 		require.Equal(t, status, data["status"])
+		require.Equal(t, "测试原因", data["error"])
+		require.Equal(t, "test_stage", data["stage"])
+		if status == "unknown" {
+			require.Nil(t, data["sent"])
+		} else {
+			require.Equal(t, sent, data["sent"])
+		}
+		structured, err := json.Marshal(result.StructuredContent)
+		require.NoError(t, err)
+		require.JSONEq(t, string(structured), result.Content[0].(*mcp.TextContent).Text)
 	}
 }
 func TestDirectMessageConcurrentSendRejectedBeforeBrowser(t *testing.T) {

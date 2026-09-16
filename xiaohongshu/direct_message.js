@@ -34,11 +34,31 @@ SOFTWARE.
     // 使用纯文本，保留换行；已有网页表情按其 alt 文本读取，避免漏掉草稿内容。
     const plainText = el => {
         if (!el) return '';
-        const copy = el.cloneNode(true);
-        copy.querySelectorAll('img').forEach(img => img.replaceWith(img.alt || '\uFFFC'));
-        copy.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
-        copy.querySelectorAll('div,p').forEach(block => block.prepend('\n'));
-        return copy.textContent.replace(/\r\n/g, '\n').trim();
+        // Chromium insertText creates block lines; a sole <br> in an empty
+        // block is a caret placeholder, not an additional blank line.
+        const read = parent => {
+            const lines = [];
+            let inline = '';
+            let hasInline = false;
+            for (const node of parent.childNodes) {
+                if (node.nodeType === Node.ELEMENT_NODE && /^(DIV|P)$/.test(node.tagName)) {
+                    if (hasInline) { lines.push(inline); inline = ''; hasInline = false; }
+                    lines.push(read(node));
+                } else {
+                    hasInline = true;
+                    if (node.nodeType === Node.TEXT_NODE) inline += node.data;
+                    else if (node.nodeName === 'IMG') inline += node.alt || '\uFFFC';
+                    else if (node.nodeName === 'BR') {
+                        // The terminal BR keeps the caret on an otherwise empty line.
+                        const blockParent = parent === el || /^(DIV|P)$/.test(parent.nodeName);
+                        if (!blockParent || node !== parent.lastChild) inline += '\n';
+                    } else if (node.nodeType === Node.ELEMENT_NODE) inline += read(node);
+                }
+            }
+            if (hasInline) lines.push(inline);
+            return lines.join('\n');
+        };
+        return read(el).replace(/\r\n/g, '\n').trim();
     };
     const onChat = location.origin === 'https://www.xiaohongshu.com' &&
         /^\/chat(?:\/|$)/.test(location.pathname);
@@ -99,13 +119,15 @@ SOFTWARE.
         }
         return '';
     };
+    const reject = (error, stage = 'pre_submit_rejected', details = {}) => ({error, stage, submitted: false, rejected_before_submit: true, ...details});
     const error = check();
-    if (error) return {error};
+    if (error) return params.action === 'send' ? reject(error) : {error};
     if (params.action === 'check') return state();
     if (params.action === 'send') {
-        if (plainText(editor) !== params.content) return {error: '发送前正文发生变化，已停止'};
+        const draft = plainText(editor);
+        if (draft !== params.content) return reject('发送前正文不一致，尚未触发发送', 'content_mismatch', {expected_length: params.content.length, actual_length: draft.length, content_matches: false});
         const messages = outgoing();
-        if (messages.at(-1)?.text === params.content) return {error: '检测到重复私信，已停止'};
+        if (messages.at(-1)?.text === params.content) return reject('检测到重复私信，尚未触发发送');
         const before_ids = messages.map(message => message.message_id);
         editor.focus();
         // 网页桌面端的发送入口为 Enter；Shift+Enter 为换行。

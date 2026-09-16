@@ -161,6 +161,16 @@ func ClickAt(page *rod.Page, pt proto.Point) error {
 }
 
 func Type(ctx context.Context, elem *rod.Element, text string) error {
+	return typeText(ctx, elem, text, false)
+}
+
+// TypeContentEditable inserts line breaks without Enter key events or Chromium
+// paragraph splitting. Regular text retains the same per-character pacing.
+func TypeContentEditable(ctx context.Context, elem *rod.Element, text string) error {
+	return typeText(ctx, elem, text, true)
+}
+
+func typeText(ctx context.Context, elem *rod.Element, text string, lineBreaks bool) error {
 	dist := defaultProvider.Timing()[Keystroke]
 
 	if err := elem.Focus(); err != nil {
@@ -179,7 +189,13 @@ func Type(ctx context.Context, elem *rod.Element, text string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := page.InsertText(string(r)); err != nil {
+		var err error
+		if lineBreaks && r == '\n' {
+			err = (proto.InputDispatchKeyEvent{Type: proto.InputDispatchKeyEventTypeKeyDown, Commands: []string{"insertLineBreak"}}).Call(page)
+		} else {
+			err = page.InsertText(string(r))
+		}
+		if err != nil {
 			return err
 		}
 
