@@ -19,6 +19,7 @@ func dmRequest() DirectMessageRequest {
 }
 
 type fakeDirectMessagePage struct {
+	sendState        *directMessageState
 	calls            []string
 	initial          directMessageState
 	states           []directMessageState
@@ -65,6 +66,9 @@ func (f *fakeDirectMessagePage) Run(ctx context.Context, action string, r Direct
 	case "list":
 		return f.initial, nil
 	case "send":
+		if f.sendState != nil {
+			return *f.sendState, f.sendErr
+		}
 		f.afterSend = true
 		if f.missingBeforeIDs {
 			return directMessageState{Submitted: true}, nil
@@ -321,5 +325,25 @@ func TestDirectMessageLongInputAcrossServiceAndActionBudgets(t *testing.T) {
 				require.Equal(t, "sent", result.Status)
 			}
 		})
+	}
+}
+
+func TestDirectMessageExplicitRejectionVsInterruptedReply(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		f := &fakeDirectMessagePage{sendState: &directMessageState{RejectedBeforeSubmit: true, Stage: "content_mismatch", Error: "正文不一致"}}
+		if interrupted {
+			f.sendErr = context.Canceled
+		}
+		result := dmAction(f).submit(context.Background(), dmRequest())
+		if interrupted {
+			require.Equal(t, "unknown", result.Status)
+			require.Nil(t, result.Sent)
+		} else {
+			require.Equal(t, "failed", result.Status)
+			require.False(t, *result.Sent)
+			require.Equal(t, "正文不一致", result.Error)
+		}
+		require.False(t, result.Success)
+		require.Equal(t, []string{"send"}, f.calls)
 	}
 }

@@ -38,7 +38,7 @@ func TestDirectMessageBrowserFixture(t *testing.T) {
 	b := rod.New().ControlURL(u)
 	require.NoError(t, b.Connect())
 	defer b.MustClose()
-	for _, mode := range []string{"sent", "failed", "pending", "wrong-name", "existing-draft", "changed-before-send", "preview", "list", "same-draft", "max-length", "recipient-during-pause", "draft-during-pause", "duplicate-during-pause", "cancel-during-input"} {
+	for _, mode := range []string{"sent", "failed", "pending", "wrong-name", "existing-draft", "changed-before-send", "preview", "list", "same-draft", "max-length", "single", "blank", "blanks", "long-blank", "recipient-during-pause", "draft-during-pause", "duplicate-during-pause", "cancel-during-input"} {
 		t.Run(mode, func(t *testing.T) {
 			page := b.MustPage("about:blank")
 			defer page.MustClose()
@@ -53,6 +53,20 @@ func TestDirectMessageBrowserFixture(t *testing.T) {
 			a.ackTimeout = 200 * time.Millisecond
 			r := dmRequest()
 			r.Content = "第一行\n第二行😀 <script>只是文字</script>"
+			switch mode {
+			case "single":
+				r.Content = "中文与表情😀🧑‍💻，空格 保留"
+			case "blank":
+				r.Content = "第一行\n\n第二行"
+			case "blanks":
+				r.Content = "第一行\n\n\n\n第二行😀"
+			case "long-blank":
+				r.Content = strings.Repeat("文", 39) + strings.Repeat("\n\n"+strings.Repeat("文", 39), 8)
+			}
+			if mode != "cancel-during-input" {
+				humanize.SetProvider(fastDirectMessageTyping{})
+			}
+			t.Cleanup(func() { humanize.SetProvider(humanize.DefaultProvider{}) })
 			if mode == "same-draft" {
 				r.Content = "已有相同草稿"
 			}
@@ -66,6 +80,11 @@ func TestDirectMessageBrowserFixture(t *testing.T) {
 			// 在指定停顿阶段改变页面，验证延迟没有绕开发送前的原子检查。
 			a.delay = func(_ context.Context, action humanize.Action) {
 				if action == humanize.BeforeSubmit {
+					if mode != "changed-before-send" {
+						snapshot, err := a.page.Run(ctx, "snapshot", r, "")
+						require.NoError(t, err)
+						require.Equal(t, r.Content, snapshot.Draft)
+					}
 					switch mode {
 					case "recipient-during-pause":
 						page.MustEval(`() => document.querySelector('.xhs-im-chat-window__header-name').textContent = '其他收件人'`)
@@ -112,17 +131,23 @@ func TestDirectMessageBrowserFixture(t *testing.T) {
 				} else {
 					require.NoError(t, err)
 					want := mode
-					if mode == "same-draft" || mode == "max-length" {
+					if mode == "same-draft" || mode == "max-length" || mode == "single" || mode == "blank" || mode == "blanks" || mode == "long-blank" {
 						want = "sent"
 					}
-					if mode == "pending" || mode == "changed-before-send" || strings.HasSuffix(mode, "-during-pause") {
+					if mode == "pending" {
 						want = "unknown"
+					}
+					if mode == "changed-before-send" || strings.HasSuffix(mode, "-during-pause") {
+						want = "failed"
+						require.NotNil(t, res.Sent)
+						require.False(t, *res.Sent)
+						require.NotEmpty(t, res.Error)
 					}
 					require.Equal(t, want, res.Status, "result: %+v", res)
 				}
 			}
 			count := page.MustEval(`() => window.sentCount`).Int()
-			if mode == "sent" || mode == "failed" || mode == "pending" || mode == "same-draft" || mode == "max-length" {
+			if mode == "sent" || mode == "failed" || mode == "pending" || mode == "same-draft" || mode == "max-length" || mode == "single" || mode == "blank" || mode == "blanks" || mode == "long-blank" {
 				require.Equal(t, 1, count)
 				require.Equal(t, r.Content, page.MustEval(`() => window.submittedText`).Str())
 				if mode != "same-draft" {
@@ -143,7 +168,7 @@ func dmFixtureHTML(mode string) string {
 		name = "另一收件人"
 	}
 	store := "0"
-	if mode == "sent" || mode == "same-draft" || mode == "max-length" {
+	if mode == "sent" || mode == "same-draft" || mode == "max-length" || mode == "single" || mode == "blank" || mode == "blanks" || mode == "long-blank" {
 		store = "1"
 	}
 	draft := ""
@@ -211,8 +236,11 @@ func TestDirectMessageStrangerBrowserFixture(t *testing.T) {
 				} else {
 					require.NoError(t, err)
 					want := mode
-					if mode == "pending" || mode == "changed-before-send" {
+					if mode == "pending" {
 						want = "unknown"
+					}
+					if mode == "changed-before-send" {
+						want = "failed"
 					}
 					require.Equal(t, want, res.Status)
 					if mode == "sent" {
@@ -292,4 +320,60 @@ func TestDirectMessageHistoryLoadBarrier(t *testing.T) {
 	require.True(t, page.MustEval(`() => window.historyReady`).Bool())
 	require.Zero(t, page.MustEval(`() => window.sentCount`).Int())
 	require.Empty(t, page.MustElement(directMessageEditor).MustText())
+}
+
+// Exercise legacy Chromium block markup independently from the new input path.
+func TestDirectMessageBlockTextBrowserFixture(t *testing.T) {
+	bin := os.Getenv("DM_TEST_BROWSER")
+	if bin == "" {
+		t.Skip("set DM_TEST_BROWSER for offline browser tests")
+	}
+	l := launcher.New().Bin(bin).Headless(true).NoSandbox(true).Set("disable-background-networking")
+	u, err := l.Launch()
+	require.NoError(t, err)
+	defer l.Cleanup()
+	b := rod.New().ControlURL(u)
+	require.NoError(t, b.Connect())
+	defer b.MustClose()
+	page := b.MustPage("about:blank")
+	defer page.MustClose()
+	router := page.HijackRequests()
+	defer router.MustStop()
+	router.MustAdd("*", func(h *rod.Hijack) {
+		h.Response.SetHeader("Content-Type", "text/html; charset=utf-8").SetBody(dmFixtureHTML("sent"))
+	})
+	go router.Run()
+	require.NoError(t, page.Navigate(chatURL+"?openUid="+dmTestID))
+	require.NoError(t, page.WaitLoad())
+	p := rodDirectMessagePage{page}
+	for _, tc := range []struct{ html, text string }{
+		{"第一行<div><br></div><div>第二行</div>", "第一行\n\n第二行"},
+		{"<div>第一行</div><div><br></div><div><br></div><div>第二行😀</div>", "第一行\n\n\n第二行😀"},
+		{"<p>中文<span>😀</span></p><p><br></p><p>末行</p>", "中文😀\n\n末行"},
+		{"首行<br><br>末行", "首行\n\n末行"},
+		{"<div><br></div>", ""},
+	} {
+		page.MustEval(`html => document.querySelector('.xhs-im-input-bar-editor').innerHTML = html`, tc.html)
+		state, err := p.Run(context.Background(), "snapshot", dmRequest(), "")
+		require.NoError(t, err)
+		require.Equal(t, tc.text, state.Draft)
+	}
+	humanize.SetProvider(fastDirectMessageTyping{})
+	defer humanize.SetProvider(humanize.DefaultProvider{})
+	text := strings.Repeat("文", 39) + strings.Repeat("\n\n"+strings.Repeat("文", 39), 8)
+	require.Equal(t, 367, utf8.RuneCountInString(text))
+	page.MustEval(`() => document.querySelector('.xhs-im-input-bar-editor').textContent = ''`)
+	require.NoError(t, humanize.Type(context.Background(), page.MustElement(directMessageEditor), text))
+	state, err := p.Run(context.Background(), "snapshot", dmRequest(), "")
+	require.NoError(t, err)
+	require.Equal(t, text, state.Draft)
+	// A deliberate one-newline difference is still rejected before any Enter event.
+	req := dmRequest()
+	req.Content = strings.Replace(text, "\n\n", "\n", 1)
+	result := NewDirectMessageAction(page).submit(context.Background(), req)
+	require.Equal(t, "failed", result.Status)
+	require.False(t, *result.Sent)
+	require.Equal(t, "content_mismatch", result.Stage)
+	require.Contains(t, result.Error, "正文不一致")
+	require.Zero(t, page.MustEval(`() => window.sentCount`).Int())
 }

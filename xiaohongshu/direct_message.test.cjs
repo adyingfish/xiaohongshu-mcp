@@ -36,6 +36,7 @@ const content = '第一行\n😀 " \\ <script>只是文字</script>';
 function element(text = '', attrs = {}, children = {}) {
     return {
         textContent: text,
+        get childNodes() { return [{nodeType: 3, data: this.textContent}]; },
         events: [],
         width: 100,
         getBoundingClientRect() { return {width: this.width, height: 20}; },
@@ -69,6 +70,7 @@ function fixture({id = userId, nickname = name, draft = '', disabled = false} = 
     const context = {
         location,
         URLSearchParams,
+        Node: {ELEMENT_NODE: 1, TEXT_NODE: 3},
         document: {
             querySelectorAll: selector => nodes[selector] || [],
             querySelector: selector => nodes[selector]?.[0] || null,
