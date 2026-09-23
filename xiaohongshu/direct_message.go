@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-rod/rod"
+	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 )
 
@@ -84,6 +85,7 @@ type DirectMessageConversationList struct {
 
 // Sent 为 nil 表示结果未知；sent 仅代表服务端确认，不代表收件人已读。
 type DirectMessageResult struct {
+	Stage           string `json:"stage,omitempty"`
 	Success         bool   `json:"success"`
 	Status          string `json:"status"`
 	Sent            *bool  `json:"sent"`
@@ -106,18 +108,23 @@ type directMessageItem struct {
 }
 
 type directMessageState struct {
-	OnChat            bool                        `json:"on_chat_page"`
-	Ready             bool                        `json:"ready"`
-	ConversationReady bool                        `json:"conversation_ready"`
-	UserID            string                      `json:"user_id"`
-	Recipient         string                      `json:"recipient"`
-	Draft             string                      `json:"draft"`
-	Outgoing          []directMessageItem         `json:"outgoing"`
-	Conversations     []DirectMessageConversation `json:"conversations"`
-	Submitted         bool                        `json:"submitted"`
-	BeforeIDs         []string                    `json:"before_ids"`
-	NotLoggedIn       bool                        `json:"not_logged_in"`
-	Error             string                      `json:"error"`
+	RejectedBeforeSubmit bool                        `json:"rejected_before_submit"`
+	Stage                string                      `json:"stage"`
+	ExpectedLength       int                         `json:"expected_length"`
+	ActualLength         int                         `json:"actual_length"`
+	ContentMatches       bool                        `json:"content_matches"`
+	OnChat               bool                        `json:"on_chat_page"`
+	Ready                bool                        `json:"ready"`
+	ConversationReady    bool                        `json:"conversation_ready"`
+	UserID               string                      `json:"user_id"`
+	Recipient            string                      `json:"recipient"`
+	Draft                string                      `json:"draft"`
+	Outgoing             []directMessageItem         `json:"outgoing"`
+	Conversations        []DirectMessageConversation `json:"conversations"`
+	Submitted            bool                        `json:"submitted"`
+	BeforeIDs            []string                    `json:"before_ids"`
+	NotLoggedIn          bool                        `json:"not_logged_in"`
+	Error                string                      `json:"error"`
 }
 
 // 小接口让协议状态机可以离线测试，实际导航和输入仍通过 go-rod。
@@ -150,12 +157,12 @@ func (p rodDirectMessagePage) Run(ctx context.Context, action string, r DirectMe
 		return state, err
 	}
 	if err := json.Unmarshal([]byte(res.Value.JSON("", "")), &state); err != nil {
-		return state, err
+		return directMessageState{}, err
 	}
 	if state.NotLoggedIn {
 		return state, errors.New("小红书未登录，请先扫码登录")
 	}
-	if state.Error != "" {
+	if state.Error != "" && !(action == "send" && state.RejectedBeforeSubmit) {
 		return state, errors.New(state.Error)
 	}
 	return state, nil
@@ -165,7 +172,7 @@ func (p rodDirectMessagePage) Fill(ctx context.Context, text string) error {
 	if err != nil {
 		return err
 	}
-	return humanize.Type(ctx, editor, text)
+	return humanize.TypeContentEditable(ctx, editor, text)
 }
 
 type DirectMessageAction struct {
@@ -334,19 +341,34 @@ func (a *DirectMessageAction) Send(ctx context.Context, r DirectMessageRequest) 
 func (a *DirectMessageAction) submit(ctx context.Context, r DirectMessageRequest) (result *DirectMessageResult) {
 	result = messageResult(r, "unknown")
 	result.Sent = nil
-	result.Error = "未确认发送结果；请核对会话，勿直接重试"
+	result.Stage = "submit_call_error"
+	result.Error = "提交调用未返回可靠结果；无法确认是否触发发送，请核对会话，勿直接重试"
 	// 从尝试发送起，连接中断、页面切换和 panic 都不能被解释成可以重试。
 	defer func() {
 		if recover() != nil {
 			result = messageResult(r, "unknown")
 			result.Sent = nil
-			result.Error = "发送期间异常，结果未知；请核对会话，勿直接重试"
+			result.Stage = "submit_or_ack_exception"
+			result.Error = "发送或确认期间异常，结果未知；请核对会话，勿直接重试"
 		}
+		logrus.WithFields(logrus.Fields{"stage": result.Stage, "status": result.Status, "expected_length": len(utf16.Encode([]rune(r.Content)))}).Info("direct_message_result")
 	}()
 	submitted, err := a.page.Run(ctx, "send", r, "")
+	// Only a complete browser reply explicitly proving pre-dispatch rejection
+	// permits sent=false. A transport error alone cannot establish this.
+	if err == nil && submitted.RejectedBeforeSubmit && !submitted.Submitted && submitted.Error != "" {
+		result = messageResult(r, "failed")
+		result.Stage, result.Error = submitted.Stage, submitted.Error
+		if submitted.Stage == "content_mismatch" {
+			logrus.WithFields(logrus.Fields{"stage": result.Stage, "expected_length": submitted.ExpectedLength, "actual_length": submitted.ActualLength, "content_matches": submitted.ContentMatches}).Info("direct_message_pre_submit_rejected")
+		}
+		return result
+	}
 	if err != nil || !submitted.Submitted || submitted.BeforeIDs == nil {
 		return result
 	}
+	result.Stage = "ack_timeout"
+	result.Error = "已尝试发送，但等待确认超时；请核对会话，勿直接重试"
 	before := make(map[string]bool, len(submitted.BeforeIDs))
 	for _, id := range submitted.BeforeIDs {
 		before[id] = true
@@ -356,6 +378,10 @@ func (a *DirectMessageAction) submit(ctx context.Context, r DirectMessageRequest
 	for {
 		state, err := a.page.Run(ackCtx, "check", r, "")
 		if err != nil {
+			if !errors.Is(err, context.DeadlineExceeded) {
+				result.Stage = "ack_check_error"
+				result.Error = "已尝试发送，但读取确认状态失败；请核对会话，勿直接重试"
+			}
 			return result
 		}
 		var candidates []directMessageItem
@@ -368,12 +394,14 @@ func (a *DirectMessageAction) submit(ctx context.Context, r DirectMessageRequest
 			m := candidates[0]
 			if m.Failed {
 				result = messageResult(r, "failed")
+				result.Stage = "platform_failed"
 				result.MessageID = m.MessageID
 				result.Error = "网页显示发送失败，未自动重试"
 				return result
 			}
 			if positiveStoreID.MatchString(m.StoreID) && strings.TrimLeft(m.StoreID, "0") != "" && !m.Pending && state.Draft == "" {
 				result = messageResult(r, "sent")
+				result.Stage = "acknowledged"
 				*result.Sent = true
 				result.Success = true
 				result.MessageID, result.StoreID, result.Verification = m.MessageID, m.StoreID, "server_message_id"

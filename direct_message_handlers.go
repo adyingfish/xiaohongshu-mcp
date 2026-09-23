@@ -26,7 +26,7 @@ func directMessageToolResult(data any, err error) (*mcp.CallToolResult, any, err
 	if result, ok := data.(*xiaohongshu.DirectMessageResult); ok {
 		failed = !result.Success
 	}
-	return &mcp.CallToolResult{IsError: failed, Content: []mcp.Content{&mcp.TextContent{Text: string(body)}}}, nil, nil
+	return &mcp.CallToolResult{IsError: failed, StructuredContent: data, Content: []mcp.Content{&mcp.TextContent{Text: string(body)}}}, nil, nil
 }
 
 func registerDirectMessageTools(server *mcp.Server, app *AppServer) {
