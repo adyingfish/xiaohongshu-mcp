@@ -1,0 +1,6 @@
+# Keep repository text files in LF across Windows, WSL, and Unix.
+* text=auto eol=lf
+
+# Preserve CRLF for Windows command scripts if added later.
+*.bat text eol=crlf
+*.cmd text eol=crlf
