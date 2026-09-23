@@ -35,8 +35,12 @@ go.work.sum
 !.vscode/mcp.json
 .claude/
 
+# macOS
+.DS_Store
+
 # Build artifacts
 xiaohongshu-mcp
+bin/
 
 # Test scripts
 test_*.sh
